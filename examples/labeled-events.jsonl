@@ -1,0 +1,1 @@
+{"event":{"event_id":"event_1","source":"codex","role":"user","event_type":"history_prompt","content":"用户偏好中文回答。"},"expected":[{"content":"用户偏好中文回答","type":"preference","scope":"user"}]}

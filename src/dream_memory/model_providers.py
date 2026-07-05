@@ -141,3 +141,48 @@ def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str], ti
         body = exc.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"Model provider HTTP {exc.code}: {body}") from exc
     return json.loads(raw)
+
+
+
+def looks_like_inline_secret(value: str | None) -> bool:
+    if not value:
+        return False
+    lowered = value.lower()
+    return value.startswith("sk-") or value.startswith("sk_") or "api_key=" in lowered or "bearer " in lowered
+
+
+def provider_diagnostics(*, provider: str, model: str, api_key_env: str | None, base_url: str | None, timeout_seconds: int, invoke: bool = False) -> dict[str, Any]:
+    inline_secret = looks_like_inline_secret(api_key_env)
+    api_key_present = bool(api_key_env and not inline_secret and os.environ.get(api_key_env))
+    payload: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "api_key_env": api_key_env,
+        "api_key_present": api_key_present,
+        "api_key_env_looks_like_secret": inline_secret,
+        "base_url": base_url,
+        "timeout_seconds": timeout_seconds,
+        "ok": bool(api_key_present and not inline_secret),
+        "invoked": False,
+    }
+    if inline_secret:
+        payload["error"] = "api_key_env must be an environment variable name, not a raw API key"
+        return payload
+    if not api_key_present:
+        payload["error"] = f"missing environment variable: {api_key_env}"
+        return payload
+    if invoke:
+        try:
+            raw = invoke_model(
+                'Return JSON only: {"candidates": []}',
+                model=f"{provider}:{model}" if provider and ":" not in model else model,
+                api_key_env=api_key_env,
+                base_url=base_url,
+                timeout_seconds=timeout_seconds,
+            )
+            payload["invoked"] = True
+            payload["response_preview"] = raw[:500]
+        except Exception as exc:  # pragma: no cover - network/provider dependent
+            payload["ok"] = False
+            payload["error"] = str(exc)
+    return payload

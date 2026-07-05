@@ -21,6 +21,7 @@ AI 抽取路径由 LangGraph 状态图编排：`build_prompt -> invoke_model -> 
 
 ```bash
 uv sync
+uv run dream-memory init
 uv run dream-memory --help
 ```
 
@@ -63,6 +64,10 @@ uv run dream-memory --config ./memory-config.json init-config --output ./memory-
   "memory_cards": ".dream-memory/memory_cards.jsonl",
   "context_limit": 12,
   "context_format": "json",
+  "auto_export": false,
+  "export_target": "both",
+  "export_scope": "project",
+  "export_output_dir": null,
   "codex_home": "~/.codex",
   "claude_home": "~/.claude",
   "claude_state": "~/.claude.json"
@@ -76,6 +81,12 @@ uv run dream-memory --config .dream-memory/config.json pipeline \
   --input .dream-memory/imports/all-events.jsonl \
   --provider openai \
   --model gpt-4.1
+```
+
+检查 provider 配置：
+
+```bash
+uv run dream-memory check-provider
 ```
 
 API Key 仍通过环境变量配置，例如：
@@ -214,6 +225,13 @@ uv run uvicorn dream_memory.web:app --reload
 http://127.0.0.1:8000/memory-review
 ```
 
+## 更多文档
+
+- `docs/architecture.md`
+- `docs/cli.md`
+- `docs/config.md`
+- `docs/run-workflow.md`
+
 ## 当前源码结构
 
 ```text
@@ -226,6 +244,12 @@ src/dream_memory/
 ├── memory_importers.py   # Claude/Codex 会话导入
 ├── memory_models.py      # 记忆数据结构 builders
 └── web.py                # Web 审核 UI/API
+```
+
+## 评估抽取质量
+
+```bash
+uv run dream-memory eval --input examples/labeled-events.jsonl --output .dream-memory/eval.json
 ```
 
 ## 测试

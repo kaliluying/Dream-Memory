@@ -379,5 +379,81 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(main(["--config", str(config_path), "trace", "--run-id", state["run_id"], "--candidate-id", candidate["id"]]), 0)
 
 
+    def test_init_cli_creates_workspace_and_examples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exit_code = main(["init", "--path", tmp])
+
+            self.assertEqual(exit_code, 0)
+            root = Path(tmp)
+            self.assertTrue((root / ".dream-memory" / "config.json").exists())
+            self.assertTrue((root / ".dream-memory" / "imports").is_dir())
+            self.assertTrue((root / ".dream-memory" / "runs").is_dir())
+            self.assertTrue((root / "examples" / "sample-events.jsonl").exists())
+
+    def test_check_provider_detects_inline_secret_misconfiguration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"provider": "openai", "model": "gpt-test", "api_key_env": "sk-not-an-env-var"}),
+                encoding="utf-8",
+            )
+
+            exit_code = main(["--config", str(config_path), "check-provider"])
+
+            self.assertEqual(exit_code, 1)
+
+    def test_resume_auto_exports_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            export_dir = root / "export"
+            config_path = root / "config.json"
+            events_path.write_text(
+                json.dumps({
+                    "event_id": "event_1",
+                    "source": "codex",
+                    "role": "user",
+                    "event_type": "history_prompt",
+                    "project": str(export_dir),
+                    "content": "这个项目需要人工审核后才能写正式记忆",
+                }, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps({
+                    "invoke_model": False,
+                    "output_dir": str(memory_dir),
+                    "mode": "rules",
+                    "auto_export": True,
+                    "export_target": "both",
+                    "export_scope": "project",
+                    "export_output_dir": str(export_dir),
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(export_dir), "--mode", "rules"])
+            state_path = next((memory_dir / "runs").glob("*/state.json"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            candidate = json.loads(Path(state["artifacts"]["candidates_path"]).read_text(encoding="utf-8").splitlines()[0])
+            reviewed_path = Path(state["run_dir"]) / "reviewed.jsonl"
+            reviewed_path.write_text(
+                json.dumps({
+                    "candidate_id": candidate["id"],
+                    "action": "approved",
+                    "edited_content": candidate["content"],
+                    "reviewer": "user",
+                    "candidate": candidate,
+                }, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            exit_code = main(["--config", str(config_path), "resume", "--run-id", state["run_id"]])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((export_dir / "AGENTS.md").exists())
+            self.assertTrue((export_dir / "CLAUDE.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

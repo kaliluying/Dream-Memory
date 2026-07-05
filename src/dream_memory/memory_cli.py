@@ -8,6 +8,7 @@ from pathlib import Path
 from .memory_agent import agent_extract_memory_candidates
 from .memory_config import DEFAULT_CONFIG_PATH, load_memory_config, write_default_memory_config
 from .memory_export import render_all_projects_summary, write_marked_file
+from .memory_eval import evaluate_labeled_events
 from .memory_dreaming import (
     apply_reviewed_memory,
     build_agent_context,
@@ -20,6 +21,7 @@ from .memory_dreaming import (
     write_jsonl_records,
 )
 from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, write_events_jsonl
+from .model_providers import provider_diagnostics
 from .memory_runs import (
     append_trace,
     copy_input_events,
@@ -36,6 +38,46 @@ def _default_project_roots(values: list[str] | None) -> list[Path]:
     return [Path(value).expanduser() for value in values or []]
 
 
+def _init_workspace(path: Path | str, *, force: bool = False) -> dict[str, object]:
+    root = Path(path).expanduser()
+    memory_dir = root / ".dream-memory"
+    imports_dir = memory_dir / "imports"
+    runs_dir = memory_dir / "runs"
+    examples_dir = root / "examples"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    imports_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / ".gitkeep").touch()
+
+    config_path = memory_dir / "config.json"
+    if force or not config_path.exists():
+        write_default_memory_config(config_path)
+
+    sample_events = examples_dir / "sample-events.jsonl"
+    if force or not sample_events.exists():
+        examples_dir.mkdir(parents=True, exist_ok=True)
+        sample_events.write_text(
+            '{"event_id":"event_1","source":"codex","session_id":"sample","role":"user","event_type":"history_prompt","project":".","content":"用户偏好中文回答，正式记忆需要人工审核。"}\n',
+            encoding="utf-8",
+        )
+
+    sample_reviewed = examples_dir / "reviewed.example.jsonl"
+    if force or not sample_reviewed.exists():
+        sample_reviewed.write_text(
+            '{"candidate_id":"mem_example","action":"approved","edited_content":"用户偏好中文回答。","reviewer":"user","candidate":{"id":"mem_example","type":"preference","scope":"user","content":"用户偏好中文回答。","evidence":[{"event_id":"event_1"}]}}\n',
+            encoding="utf-8",
+        )
+
+    return {
+        "root": str(root),
+        "memory_dir": str(memory_dir),
+        "config_path": str(config_path),
+        "imports_dir": str(imports_dir),
+        "runs_dir": str(runs_dir),
+        "examples": [str(sample_events), str(sample_reviewed)],
+    }
+
+
 def _add_source_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codex-home", default=str(Path.home() / ".codex"))
     parser.add_argument("--claude-home", default=str(Path.home() / ".claude"))
@@ -49,8 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_source_args(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    init = sub.add_parser("init", help="Initialize a .dream-memory workspace")
+    init.add_argument("--path", default=".")
+    init.add_argument("--force", action="store_true")
+
     init_config = sub.add_parser("init-config", help="Write a default editable memory config file")
     init_config.add_argument("--output", default=str(DEFAULT_CONFIG_PATH))
+
+    check_provider = sub.add_parser("check-provider", help="Check provider config, API key env, and optionally invoke the model")
+    check_provider.add_argument("--provider")
+    check_provider.add_argument("--model")
+    check_provider.add_argument("--api-key-env")
+    check_provider.add_argument("--base-url")
+    check_provider.add_argument("--timeout-seconds", type=int)
+    check_provider.add_argument("--invoke", action="store_true")
 
     scan = sub.add_parser("scan", help="Scan available Codex/Claude sources")
     _add_source_args(scan)
@@ -157,6 +211,12 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--memory-cards")
     export.add_argument("--output-dir")
     export.add_argument("--limit", type=int)
+
+    eval_cmd = sub.add_parser("eval", help="Evaluate extraction quality with labeled JSONL")
+    eval_cmd.add_argument("--input", required=True)
+    eval_cmd.add_argument("--project")
+    eval_cmd.add_argument("--mode", choices=["rules", "ai"], default="rules")
+    eval_cmd.add_argument("--output")
 
     return parser
 
@@ -339,6 +399,21 @@ def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[
         next_actions=["generate context", "inspect trace"],
     )
     append_trace(state, "run_completed", {"reviewed_path": str(reviewed_path), "memory_count": len(cards), "decision_count": len(decisions)})
+    if bool(config.get("auto_export")):
+        export_args = argparse.Namespace(
+            target=str(config.get("export_target") or "both"),
+            scope=str(config.get("export_scope") or "project"),
+            project=state.get("project"),
+            memory_cards=str(cards_path),
+            output_dir=config.get("export_output_dir") or state.get("project") or ".",
+            limit=None,
+        )
+        auto_export_payload = _export_memory(args=export_args, config=config)
+        state = update_run_state(
+            state,
+            artifacts={"auto_export_files": auto_export_payload.get("written", [])},
+        )
+        append_trace(state, "auto_export_complete", auto_export_payload)
     return state
 
 
@@ -346,10 +421,37 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_memory_config(args.config)
 
+    if args.command == "init":
+        payload = _init_workspace(args.path, force=bool(args.force))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "init-config":
         path = write_default_memory_config(args.output)
         print(json.dumps({"config_path": str(path)}, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "check-provider":
+        provider = str(_value(args.provider, config.get("provider")))
+        model = str(_value(args.model, config["model"]))
+        api_key_env = str(_value(args.api_key_env, config.get("api_key_env")))
+        base_url = _value(args.base_url, config.get("base_url"))
+        timeout_seconds = int(_value(args.timeout_seconds, config.get("timeout_seconds", 60)))
+        payload = provider_diagnostics(provider=provider, model=model, api_key_env=api_key_env, base_url=str(base_url) if base_url else None, timeout_seconds=timeout_seconds, invoke=bool(args.invoke))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload.get("ok") else 1
+
+    if args.command == "eval":
+        payload = evaluate_labeled_events(args.input, project=args.project, mode=args.mode)
+        if args.output:
+            output = Path(args.output).expanduser()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(json.dumps({"output": str(output), **{k: payload[k] for k in ("precision", "recall", "f1")}}, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
 
     codex, claude = _build_importers(args, config)
     if args.command == "scan":
