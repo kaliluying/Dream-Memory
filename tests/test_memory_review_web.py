@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from deepagent_project_advice.web import create_app
+from deepagent_memory.web import create_app
 
 
 class MemoryReviewWebTests(unittest.TestCase):

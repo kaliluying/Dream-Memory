@@ -23,14 +23,14 @@
 
 ## File Map
 
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
   - Split current event → candidate logic into event → fact → candidate helpers.
   - Add JSONL writers/loaders for facts, review queue items, reviewed decisions, and memory cards.
   - Add conflict detection helpers, formal-memory projection helpers, and context ranking helpers.
-- Modify: `src/deepagent_project_advice/memory_cli.py`
+- Modify: `src/deepagent_memory/memory_cli.py`
   - Add `extract-facts`, `review`, `apply`, and `context` subcommands.
   - Keep `scan`, `import`, and `dream` compatible.
-- Create: `src/deepagent_project_advice/memory_models.py`
+- Create: `src/deepagent_memory/memory_models.py`
   - Centralize typed dataclasses / dict builders for atomic facts, review queue items, reviewed decisions, and memory cards.
 - Create: `tests/test_memory_models.py`
   - Cover model serialization and status defaults.
@@ -46,7 +46,7 @@
 ### Task 1: Introduce formal memory data models
 
 **Files:**
-- Create: `src/deepagent_project_advice/memory_models.py`
+- Create: `src/deepagent_memory/memory_models.py`
 - Test: `tests/test_memory_models.py`
 
 **Interfaces:**
@@ -60,7 +60,7 @@
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-from deepagent_project_advice.memory_models import (
+from deepagent_memory.memory_models import (
     build_atomic_fact,
     build_memory_card,
     build_review_queue_item,
@@ -199,15 +199,15 @@ Expected: PASS for all three tests.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_memory_models.py src/deepagent_project_advice/memory_models.py
+git add tests/test_memory_models.py src/deepagent_memory/memory_models.py
 git commit -m "feat: add dream memory data models"
 ```
 
 ### Task 2: Add atomic fact extraction and persistence
 
 **Files:**
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
-- Modify: `src/deepagent_project_advice/memory_cli.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_cli.py`
 - Modify: `tests/test_memory_dreaming.py`
 - Modify: `tests/test_memory_cli.py`
 
@@ -351,14 +351,14 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_project_advice/memory_dreaming.py src/deepagent_project_advice/memory_cli.py
+git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_memory/memory_dreaming.py src/deepagent_memory/memory_cli.py
 git commit -m "feat: extract atomic facts from memory events"
 ```
 
 ### Task 3: Convert facts to candidates with stricter promotion rules
 
 **Files:**
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
 - Modify: `tests/test_memory_dreaming.py`
 
 **Interfaces:**
@@ -441,15 +441,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_memory_dreaming.py src/deepagent_project_advice/memory_dreaming.py
+git add tests/test_memory_dreaming.py src/deepagent_memory/memory_dreaming.py
 git commit -m "feat: derive dream candidates from atomic facts"
 ```
 
 ### Task 4: Add review queue generation and conflict detection
 
 **Files:**
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
-- Modify: `src/deepagent_project_advice/memory_cli.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_cli.py`
 - Modify: `tests/test_memory_dreaming.py`
 - Modify: `tests/test_memory_cli.py`
 
@@ -570,15 +570,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_project_advice/memory_dreaming.py src/deepagent_project_advice/memory_cli.py
+git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_memory/memory_dreaming.py src/deepagent_memory/memory_cli.py
 git commit -m "feat: add review queue for dream memory"
 ```
 
 ### Task 5: Add apply flow for reviewed decisions and formal memory cards
 
 **Files:**
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
-- Modify: `src/deepagent_project_advice/memory_cli.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_cli.py`
 - Modify: `tests/test_memory_dreaming.py`
 - Modify: `tests/test_memory_cli.py`
 
@@ -691,15 +691,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_project_advice/memory_dreaming.py src/deepagent_project_advice/memory_cli.py
+git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_memory/memory_dreaming.py src/deepagent_memory/memory_cli.py
 git commit -m "feat: apply reviewed dream memory cards"
 ```
 
 ### Task 6: Add task-scoped context generation for agents
 
 **Files:**
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
-- Modify: `src/deepagent_project_advice/memory_cli.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_cli.py`
 - Modify: `tests/test_memory_dreaming.py`
 - Modify: `tests/test_memory_cli.py`
 
@@ -793,15 +793,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_project_advice/memory_dreaming.py src/deepagent_project_advice/memory_cli.py
+git add tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_memory/memory_dreaming.py src/deepagent_memory/memory_cli.py
 git commit -m "feat: generate scoped dream memory context"
 ```
 
 ### Task 7: Tighten safety rules and document the full pipeline
 
 **Files:**
-- Modify: `src/deepagent_project_advice/memory_dreaming.py`
-- Modify: `src/deepagent_project_advice/memory_agent.py`
+- Modify: `src/deepagent_memory/memory_dreaming.py`
+- Modify: `src/deepagent_memory/memory_agent.py`
 - Modify: `README.md`
 - Modify: `tests/test_memory_dreaming.py`
 
@@ -903,7 +903,7 @@ Expected: PASS for all focused memory tests.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add README.md tests/test_memory_models.py tests/test_memory_importers.py tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_project_advice/memory_models.py src/deepagent_project_advice/memory_dreaming.py src/deepagent_project_advice/memory_agent.py src/deepagent_project_advice/memory_cli.py
+git add README.md tests/test_memory_models.py tests/test_memory_importers.py tests/test_memory_dreaming.py tests/test_memory_cli.py src/deepagent_memory/memory_models.py src/deepagent_memory/memory_dreaming.py src/deepagent_memory/memory_agent.py src/deepagent_memory/memory_cli.py
 git commit -m "docs: finalize dream memory workflow"
 ```
 

@@ -427,7 +427,7 @@ uv run deepagent-advice --project ./my-app --task "验证项目" --output-dir ou
 启动 Web 控制台：
 
 ```bash
-uv run uvicorn deepagent_project_advice.web:app --reload
+uv run uvicorn deepagent_memory.web:app --reload
 ```
 
 记忆人工审核界面：

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_project_advice.memory_importers import (
+from deepagent_memory.memory_importers import (
     ClaudeCodeImporter,
     CodexImporter,
     NormalizedSessionEvent,

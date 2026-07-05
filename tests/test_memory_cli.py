@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_project_advice.memory_cli import main
+from deepagent_memory.memory_cli import main
 
 
 class MemoryCliTests(unittest.TestCase):

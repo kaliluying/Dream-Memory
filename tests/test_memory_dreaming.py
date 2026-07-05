@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_project_advice.memory_agent import build_memory_extraction_prompt
-from deepagent_project_advice.memory_dreaming import (
+from deepagent_memory.memory_agent import build_memory_extraction_prompt
+from deepagent_memory.memory_dreaming import (
     DreamResult,
     apply_reviewed_memory,
     build_agent_context,
@@ -19,7 +19,7 @@ from deepagent_project_advice.memory_dreaming import (
     render_context_markdown,
     score_candidate,
 )
-from deepagent_project_advice.memory_cli import main
+from deepagent_memory.memory_cli import main
 
 
 class MemoryDreamingTests(unittest.TestCase):
