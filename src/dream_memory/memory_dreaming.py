@@ -64,6 +64,12 @@ def write_jsonl_records(records: list[dict[str, Any]], path: Path | str) -> Path
     return output
 
 
+def normalize_project_path(project: str | None) -> str | None:
+    if not project:
+        return None
+    return str(Path(project).expanduser().absolute())
+
+
 def normalize_memory_text(value: str) -> str:
     text = re.sub(r"\s+", " ", str(value).strip().lower())
     text = re.sub(r"[。．.!！?？,，;；:：]+$", "", text)
@@ -112,7 +118,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
         if not content or SENSITIVE_RE.search(content):
             continue
         lowered = content.lower()
-        event_project = event.get("project") or project
+        event_project = normalize_project_path(str(event.get("project") or project)) if (event.get("project") or project) else None
 
         if event_type == "global_instruction" or "始终" in content or "偏好" in content or "prefer" in lowered:
             facts.append(build_atomic_fact(
@@ -280,7 +286,7 @@ def build_candidates_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, A
         if not content or SENSITIVE_RE.search(content) or _is_raw_transcript_like(content):
             continue
         scope = str(fact.get("scope") or "global")
-        project = fact.get("project")
+        project = normalize_project_path(str(fact.get("project"))) if fact.get("project") else None
         key_content = normalize_memory_text(content)
         key = _candidate_id(key_content, scope, str(project) if project else None)
         candidate = candidates.setdefault(key, {
@@ -357,7 +363,7 @@ def _memory_update_from_web_review(review: dict[str, Any]) -> dict[str, Any] | N
     if not summary:
         return None
     scope = str(candidate.get("scope") or "global")
-    project = candidate.get("project")
+    project = normalize_project_path(str(candidate.get("project"))) if candidate.get("project") else None
     memory_type = str(candidate.get("type") or candidate.get("memory_type") or "memory")
     evidence_refs = _evidence_refs_from_candidate(candidate)
     memory_id = str(review.get("memory_id") or _candidate_id(normalize_memory_text(summary), scope, str(project) if project else None))
@@ -420,8 +426,11 @@ def apply_reviewed_memory(
 
 
 def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | None, limit: int = 12) -> dict[str, Any]:
+    normalized_project = normalize_project_path(project)
+
     def rank(card: dict[str, Any]) -> tuple[int, str]:
-        if project and card.get("scope") == "project" and card.get("project") == project:
+        card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
+        if normalized_project and card.get("scope") == "project" and card_project == normalized_project:
             return (0, str(card.get("summary")))
         if card.get("scope") == "user":
             return (1, str(card.get("summary")))
@@ -435,11 +444,15 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
     for card in memory_cards:
         if card.get("status") != "active":
             continue
-        if card.get("scope") == "project" and project and card.get("project") != project:
-            continue
+        if card.get("scope") == "project":
+            card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
+            if not normalized_project or card_project != normalized_project:
+                continue
+            card = dict(card)
+            card["project"] = card_project
         filtered.append(card)
     ranked = sorted(filtered, key=rank)[:limit]
-    return {"project": project, "count": len(ranked), "items": ranked}
+    return {"project": normalized_project, "count": len(ranked), "items": ranked}
 
 
 def render_context_markdown(context: dict[str, Any]) -> str:

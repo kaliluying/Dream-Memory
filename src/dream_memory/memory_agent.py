@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .memory_dreaming import normalize_project_path
+
 
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<json>\{.*?\})\s*```", re.DOTALL)
@@ -150,7 +152,7 @@ def validate_agent_candidates(candidates: list[dict[str, Any]], *, project: str 
             continue
         candidate_project = raw.get("project")
         if scope == "project":
-            candidate_project = str(candidate_project or project or "") or None
+            candidate_project = normalize_project_path(str(candidate_project or project or ""))
             if not candidate_project:
                 continue
         elif scope in {"user", "global"}:

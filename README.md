@@ -95,7 +95,7 @@ uv run dream-memory scan --output .dream-memory/scan.json
 # 2. 导入事件
 uv run dream-memory import all --output-dir .dream-memory/imports --dry-run
 
-# 3. 默认 AI 梦境抽取：只生成 prompt，不调用模型
+# 3. 默认 AI 梦境抽取：调用模型生成候选记忆
 uv run dream-memory dream   --input .dream-memory/imports/all-events.jsonl   --project .   --output-dir .dream-memory
 
 # 4. 调用模型生成候选记忆
@@ -160,6 +160,32 @@ Web API 也支持 run 状态查询：
 
 Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 run 后可查看该 run 的候选记忆和 trace，并将审核结果写入 run 专属的 `reviewed.jsonl`。Web API 也提供 `POST /api/memory/runs/start` 用于启动 run，`POST /api/memory/runs/{run_id}/resume` 用于审核后恢复并应用正式记忆。
 
+
+## 导出给 Codex / Claude Code
+
+项目级上下文默认导出到当前项目下的 `AGENTS.md` / `CLAUDE.md`，只包含当前项目记忆、用户级记忆和全局记忆，不会注入其他项目的 project memory。
+
+```bash
+# 导出当前项目上下文给 Codex 和 Claude Code
+uv run dream-memory export --target both --project .
+
+# 只导出给 Codex
+uv run dream-memory export --target codex --project .
+
+# 只导出给 Claude Code
+uv run dream-memory export --target claude --project .
+```
+
+导出会替换 `<!-- DREAM_MEMORY_START -->` 和 `<!-- DREAM_MEMORY_END -->` 之间的内容，保留文件其他部分。
+
+## 所有项目总览
+
+如果想查看所有项目的正式记忆，使用 summary，而不是把所有项目注入单个项目上下文：
+
+```bash
+uv run dream-memory summary --scope all-projects --output .dream-memory/PROJECTS.md
+```
+
 ## 输出文件
 
 运行产物默认在 `.dream-memory/` 下生成：
@@ -196,6 +222,7 @@ src/dream_memory/
 ├── memory_agent.py       # AI prompt、模型输出解析、候选校验
 ├── memory_cli.py         # dream-memory CLI
 ├── memory_dreaming.py    # 安全过滤、候选/审核/应用/context 核心逻辑
+├── memory_export.py      # AGENTS.md / CLAUDE.md 导出和全项目 summary
 ├── memory_importers.py   # Claude/Codex 会话导入
 ├── memory_models.py      # 记忆数据结构 builders
 └── web.py                # Web 审核 UI/API

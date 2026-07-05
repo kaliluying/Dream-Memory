@@ -7,12 +7,14 @@ from pathlib import Path
 
 from .memory_agent import agent_extract_memory_candidates
 from .memory_config import DEFAULT_CONFIG_PATH, load_memory_config, write_default_memory_config
+from .memory_export import render_all_projects_summary, write_marked_file
 from .memory_dreaming import (
     apply_reviewed_memory,
     build_agent_context,
     build_review_queue,
     dream_from_events,
     render_context_markdown,
+    normalize_project_path,
     extract_atomic_facts,
     load_events_jsonl,
     write_jsonl_records,
@@ -142,6 +144,19 @@ def build_parser() -> argparse.ArgumentParser:
     trace.add_argument("--run-id", required=True)
     trace.add_argument("--candidate-id")
     trace.add_argument("--output-dir")
+
+    summary = sub.add_parser("summary", help="Render all-projects memory summary")
+    summary.add_argument("--scope", choices=["all-projects"], default="all-projects")
+    summary.add_argument("--memory-cards")
+    summary.add_argument("--output")
+
+    export = sub.add_parser("export", help="Export approved memory into AGENTS.md and/or CLAUDE.md")
+    export.add_argument("--target", choices=["codex", "claude", "both"], default="both")
+    export.add_argument("--scope", choices=["project", "global"], default="project")
+    export.add_argument("--project")
+    export.add_argument("--memory-cards")
+    export.add_argument("--output-dir")
+    export.add_argument("--limit", type=int)
 
     return parser
 
@@ -275,6 +290,30 @@ def _run_dream_to_review(
     return payload, state
 
 
+def _memory_cards_path(args: argparse.Namespace, config: dict[str, object]) -> str:
+    return str(_value(getattr(args, "memory_cards", None), config["memory_cards"]))
+
+
+def _export_memory(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
+    cards = load_events_jsonl(Path(_memory_cards_path(args, config)))
+    output_dir = Path(str(_value(args.output_dir, args.project or "."))).expanduser()
+    if args.scope == "project":
+        project = normalize_project_path(args.project or str(output_dir))
+        context = build_agent_context(cards, project=project, limit=int(_value(args.limit, config["context_limit"])))
+    else:
+        non_project_cards = [card for card in cards if card.get("scope") in {"user", "global"}]
+        context = build_agent_context(non_project_cards, project=None, limit=int(_value(args.limit, config["context_limit"])))
+    markdown = render_context_markdown(context)
+    written: list[str] = []
+    if args.target in {"codex", "both"}:
+        target = output_dir / "AGENTS.md" if args.scope == "project" else Path.home() / ".codex" / "AGENTS.md"
+        written.append(str(write_marked_file(target, markdown, heading="## Dream Memory Context")))
+    if args.target in {"claude", "both"}:
+        target = output_dir / "CLAUDE.md" if args.scope == "project" else Path.home() / ".claude" / "CLAUDE.md"
+        written.append(str(write_marked_file(target, markdown, heading="## Dream Memory Context")))
+    return {"target": args.target, "scope": args.scope, "project": context.get("project"), "written": written, "count": context.get("count")}
+
+
 def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
     output_dir = _configured_output_dir(args, config)
     state = load_run_state(output_dir, args.run_id)
@@ -396,6 +435,23 @@ def main(argv: list[str] | None = None) -> int:
             payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.exists() else {"candidate_id": args.candidate_id, "trace": read_trace(output_dir, args.run_id, candidate_id=args.candidate_id)}
         else:
             payload = {"run_id": args.run_id, "trace": read_trace(output_dir, args.run_id)}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "summary":
+        cards = load_events_jsonl(Path(_memory_cards_path(args, config)))
+        markdown = render_all_projects_summary(cards)
+        if args.output:
+            output = Path(args.output).expanduser()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(markdown, encoding="utf-8")
+            print(json.dumps({"output": str(output), "scope": args.scope}, ensure_ascii=False, indent=2))
+        else:
+            print(markdown, end="")
+        return 0
+
+    if args.command == "export":
+        payload = _export_memory(args=args, config=config)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
