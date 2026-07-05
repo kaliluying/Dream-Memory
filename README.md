@@ -55,7 +55,7 @@ uv run deepagent-memory context   --project .   --memory-cards .deepagent/memory
 uv run deepagent-memory pipeline   --input .deepagent/memory/imports/all-events.jsonl   --project .   --output-dir .deepagent/memory
 ```
 
-`pipeline` 默认使用 AI dry-run 生成 `agent-prompt.md` 和空的 `agent-candidates.jsonl`；添加 `--invoke-model` 后才会调用模型。规则 fallback 可使用 `--mode rules`。
+`pipeline` 默认会调用 AI 生成候选记忆；如果只想生成 `agent-prompt.md` 而不调用模型，添加 `--dry-run`。规则 fallback 可使用 `--mode rules`。
 
 ## 输出文件
 

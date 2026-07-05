@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_memory.memory_cli import main
+from deepagent_memory.memory_cli import build_parser, main
 
 
 class MemoryCliTests(unittest.TestCase):
@@ -66,7 +66,7 @@ class MemoryCliTests(unittest.TestCase):
             events.write_text('{"source":"codex","role":"user","content":"希望项目像 Claude Code","project":"/tmp/p"}\n', encoding="utf-8")
             output_dir = root / "memory"
 
-            exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir), "--agent"])
+            exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir), "--agent", "--dry-run"])
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "agent-prompt.md").exists())
@@ -235,21 +235,21 @@ class MemoryCliTests(unittest.TestCase):
             output_dir = root / "memory"
             events_path.write_text(json.dumps({"event_id": "event_1", "source": "codex", "session_id": "s1", "role": "user", "event_type": "history_prompt", "content": "这个项目需要人工审核后才能写正式记忆"}, ensure_ascii=False) + "\n", encoding="utf-8")
 
-            exit_code = main(["pipeline", "--input", str(events_path), "--project", str(root), "--output-dir", str(output_dir)])
+            exit_code = main(["pipeline", "--input", str(events_path), "--project", str(root), "--output-dir", str(output_dir), "--dry-run"])
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "facts.jsonl").exists())
             self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
             self.assertTrue((output_dir / "review_queue.jsonl").exists())
 
-    def test_dream_defaults_to_ai_dry_run_prompt_without_rule_candidates(self):
+    def test_dream_dry_run_writes_prompt_without_rule_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             events = root / "events.jsonl"
             events.write_text(json.dumps({"source": "codex", "role": "user", "content": "希望项目像 Claude Code", "project": "/tmp/p"}, ensure_ascii=False) + "\n", encoding="utf-8")
             output_dir = root / "memory"
 
-            exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir)])
+            exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir), "--dry-run"])
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "agent-prompt.md").exists())
@@ -268,6 +268,17 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "candidates.jsonl").exists())
             self.assertFalse((output_dir / "agent-candidates.jsonl").exists())
+
+    def test_ai_mode_invokes_model_by_default_and_dry_run_disables_it(self):
+        parser = build_parser()
+
+        dream_args = parser.parse_args(["dream", "--input", "events.jsonl"])
+        dry_run_args = parser.parse_args(["dream", "--input", "events.jsonl", "--dry-run"])
+        pipeline_args = parser.parse_args(["pipeline", "--input", "events.jsonl"])
+
+        self.assertTrue(dream_args.invoke_model)
+        self.assertFalse(dry_run_args.invoke_model)
+        self.assertTrue(pipeline_args.invoke_model)
 
 
 if __name__ == "__main__":

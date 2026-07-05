@@ -52,7 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     dream.add_argument("--mode", choices=["ai", "rules"], default="ai", help="Extraction mode: ai is default; rules is fallback/debug")
     dream.add_argument("--agent", action="store_true", help="Deprecated alias for --mode ai")
     dream.add_argument("--model", default="anthropic:claude-sonnet-4-6")
-    dream.add_argument("--invoke-model", action="store_true", help="Actually invoke the model; default writes prompt only")
+    dream.set_defaults(invoke_model=True)
+    dream.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
+    dream.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
 
     extract = sub.add_parser("extract-facts", help="Extract atomic facts from normalized events")
     extract.add_argument("--input", required=True)
@@ -83,7 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--memory-cards")
     pipeline.add_argument("--mode", choices=["ai", "rules"], default="ai")
     pipeline.add_argument("--model", default="anthropic:claude-sonnet-4-6")
-    pipeline.add_argument("--invoke-model", action="store_true")
+    pipeline.set_defaults(invoke_model=True)
+    pipeline.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
+    pipeline.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
 
     return parser
 
