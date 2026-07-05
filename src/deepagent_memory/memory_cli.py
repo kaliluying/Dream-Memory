@@ -209,6 +209,7 @@ def _run_dream_to_review(
     args: argparse.Namespace,
     config: dict[str, object],
     persistent: bool,
+    existing_state: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     events = load_events_jsonl(Path(args.input))
     output_dir = _configured_output_dir(args, config)
@@ -218,7 +219,7 @@ def _run_dream_to_review(
     _apply_provider_env(args, config)
     state: dict[str, object] | None = None
     if persistent:
-        state = create_run_state(memory_dir=output_dir, project=args.project, input_path=str(args.input), mode=mode, model=model, invoke_model=invoke_model)
+        state = existing_state or create_run_state(memory_dir=output_dir, project=args.project, input_path=str(args.input), mode=mode, model=model, invoke_model=invoke_model)
         events_path = copy_input_events(args.input, state)
         state = update_run_state(state, status="running", phase="extracting", artifacts={"events_path": str(events_path)})
         append_trace(state, "events_copied", {"events_path": str(events_path), "event_count": len(events)})

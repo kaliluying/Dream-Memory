@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from .memory_cli import _resume_run, _run_dream_to_review
 from .memory_config import DEFAULT_MEMORY_CONFIG
 from .memory_dreaming import normalize_review_decision
-from .memory_runs import append_trace, list_runs, load_run_state, read_trace
+from .memory_runs import append_trace, create_run_state, list_runs, load_run_state, read_trace, update_run_state
 
 
 class MemoryReviewRequest(BaseModel):
@@ -264,15 +264,38 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
     def memory_run_start(request: MemoryRunStartRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
         config = _web_config(memory_dir)
         args = _run_namespace(request, memory_dir)
+        mode = str(request.mode or config["mode"])
+        provider = request.provider or config.get("provider")
+        configured_model = str(request.model or config["model"])
+        model = f"{provider}:{configured_model}" if provider and ":" not in configured_model else configured_model
+        invoke_model = bool(config["invoke_model"] if request.invoke_model is None else request.invoke_model)
+        state = create_run_state(
+            memory_dir=memory_dir,
+            project=request.project,
+            input_path=request.input,
+            mode=mode,
+            model=model,
+            invoke_model=invoke_model,
+        )
+        state = update_run_state(
+            state,
+            status="queued",
+            phase="queued",
+            next_actions=["poll /api/memory/runs/{run_id}", "wait for waiting_review"],
+        )
+        append_trace(state, "run_queued", {"input_path": request.input, "project": request.project})
 
         def run_task() -> None:
-            # The local file-backed implementation is safe to run synchronously in tests;
-            # BackgroundTasks keeps the API contract ready for async UI polling.
-            return None
+            _run_dream_to_review(args=args, config=config, persistent=True, existing_state=state)
 
         background_tasks.add_task(run_task)
-        payload, _state = _run_dream_to_review(args=args, config=config, persistent=True)
-        return {"ok": True, "run_id": payload["run_id"], "state_path": payload["state_path"], "run_dir": payload["run_dir"]}
+        return {
+            "ok": True,
+            "run_id": state["run_id"],
+            "state_path": str(Path(str(state["run_dir"])) / "state.json"),
+            "run_dir": state["run_dir"],
+            "status": "queued",
+        }
 
     @app.get("/api/memory/runs")
     def memory_runs() -> dict[str, Any]:

@@ -199,6 +199,7 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertIn("run_id", payload)
+            self.assertEqual(payload["status"], "queued")
             state_path = memory_dir / "runs" / payload["run_id"] / "state.json"
             self.assertTrue(state_path.exists())
             state = json.loads(state_path.read_text(encoding="utf-8"))
