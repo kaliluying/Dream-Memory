@@ -9,7 +9,7 @@ from .analyzer import build_project_analysis
 from .tools import list_files, read_file, search_code
 
 
-DEEPAGENT_SYSTEM_PROMPT = """You are DeepAgent Memory, a local assistant focused on importing, reviewing, and injecting durable agent memory.
+DEEPAGENT_SYSTEM_PROMPT = """You are DeepAgent Memory, a local assistant built on the DeepAgents framework and focused on importing, reviewing, and injecting durable agent memory.
 
 Operate safely:
 - Read and analyze the local project before suggesting changes.
