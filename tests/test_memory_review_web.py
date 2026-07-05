@@ -228,6 +228,45 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(resume_response.json()["status"], "completed")
             self.assertTrue((memory_dir / "MEMORY.md").exists())
 
+    def test_api_memory_run_review_progress_counts_pending_and_reviewed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="ai", model="anthropic:test", invoke_model=False)
+            candidates_path = Path(state["run_dir"]) / "candidates.jsonl"
+            candidates_path.write_text("\n".join([
+                json.dumps({"id": "cand_1", "status": "review", "type": "preference", "content": "用户偏好中文。"}, ensure_ascii=False),
+                json.dumps({"id": "cand_2", "status": "review", "type": "workflow", "content": "正式记忆需要审核。"}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"candidates_path": str(candidates_path)})
+            reviewed_path = Path(state["run_dir"]) / "reviewed.jsonl"
+            reviewed_path.write_text(json.dumps({"candidate_id": "cand_1", "action": "approved", "status": "approved"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get(f"/api/memory/runs/{state['run_id']}/review-progress")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["total"], 2)
+            self.assertEqual(payload["reviewed"], 1)
+            self.assertEqual(payload["pending"], 1)
+            self.assertEqual(payload["actions"]["approved"], 1)
+
+    def test_memory_review_page_contains_grouped_candidates_and_progress_ui(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get("/memory-review")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("审核进度", response.text)
+            self.assertIn("loadReviewProgress", response.text)
+            self.assertIn("groupCandidates", response.text)
+            self.assertIn("候选分组", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

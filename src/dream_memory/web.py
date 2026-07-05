@@ -91,6 +91,9 @@ MEMORY_REVIEW_HTML = """
     .item.active { outline: 2px solid #2563eb; }
     .muted { color: #667085; }
     .pill { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 12px; margin-right: 4px; }
+    .group-title { margin: 12px 0 6px; font-size: 13px; font-weight: 800; color: #344054; text-transform: uppercase; }
+    .progress { display: grid; gap: 6px; font-size: 13px; }
+    .progress strong { color: #172033; }
     pre { white-space: pre-wrap; background: #0f172a; color: #e5e7eb; padding: 12px; border-radius: 10px; }
   </style>
 </head>
@@ -100,7 +103,9 @@ MEMORY_REVIEW_HTML = """
   <aside>
     <h2>运行状态</h2>
     <div id="runs" class="muted">加载运行状态...</div>
-    <h2>候选记忆</h2>
+    <h2>审核进度</h2>
+    <div id="reviewProgress" class="muted">选择 run 后显示进度</div>
+    <h2>候选分组</h2>
     <input id="search" placeholder="搜索内容/标签" />
     <select id="statusFilter"><option value="">全部状态</option><option value="promote">promote</option><option value="review">review</option><option value="reject">reject</option></select>
     <select id="scopeFilter"><option value="">全部范围</option><option value="user">user</option><option value="global">global</option><option value="project">project</option></select>
@@ -143,8 +148,16 @@ async function selectRun(runId) {
   const data = await res.json();
   candidates = data.candidates || [];
   document.getElementById('status').textContent = `当前 run: ${runId}`;
+  await loadReviewProgress();
   await loadTrace();
   renderList();
+}
+async function loadReviewProgress() {
+  if (!selectedRunId) return;
+  const res = await fetch(`/api/memory/runs/${selectedRunId}/review-progress`);
+  const data = await res.json();
+  const actions = data.actions || {};
+  document.getElementById('reviewProgress').innerHTML = `<div class="progress"><div><strong>${data.reviewed || 0}</strong> / ${data.total || 0} reviewed</div><div>Pending: <strong>${data.pending || 0}</strong></div><div>Approved: ${actions.approved || 0} · Rejected: ${actions.rejected || 0} · Needs evidence: ${actions.needs_more_evidence || 0}</div></div>`;
 }
 async function loadTrace() {
   if (!selectedRunId) return;
@@ -158,13 +171,29 @@ async function loadCandidates() {
   candidates = data.candidates || [];
   renderList();
 }
+function groupCandidates(items) {
+  return items.reduce((groups, candidate) => {
+    const key = candidate.status || 'unknown';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(candidate);
+    return groups;
+  }, {});
+}
+function candidateHtml(c) {
+  const conflictCount = (c.conflicts || []).length;
+  const conflict = conflictCount ? `<span class="pill">conflicts ${conflictCount}</span>` : '';
+  return `<div class="item ${selected && selected.id === c.id ? 'active' : ''}" onclick="selectCandidate('${c.id}')"><b>${escapeHtml(c.type || '')}</b><br>${escapeHtml((c.content || '').slice(0, 120))}<br><span class="pill">${escapeHtml(c.scope || '')}</span><span class="pill">${escapeHtml(String(c.score || ''))}</span>${conflict}</div>`;
+}
 function renderList() {
   const q = document.getElementById('search').value.toLowerCase();
   const sf = document.getElementById('statusFilter').value;
   const scf = document.getElementById('scopeFilter').value;
   const list = document.getElementById('list');
   const filtered = candidates.filter(c => (!sf || c.status === sf) && (!scf || c.scope === scf) && (!q || JSON.stringify(c).toLowerCase().includes(q)));
-  list.innerHTML = filtered.map(c => `<div class="item ${selected && selected.id === c.id ? 'active' : ''}" onclick="selectCandidate('${c.id}')"><b>${escapeHtml(c.type || '')}</b><br>${escapeHtml((c.content || '').slice(0, 120))}<br><span class="pill">${escapeHtml(c.scope || '')}</span><span class="pill">${escapeHtml(String(c.score || ''))}</span></div>`).join('') || '没有候选项';
+  const groups = groupCandidates(filtered);
+  const order = ['promote', 'review', 'reject', 'unknown'];
+  const html = order.filter(key => groups[key] && groups[key].length).map(key => `<div class="group-title">${escapeHtml(key)} (${groups[key].length})</div>` + groups[key].map(candidateHtml).join('')).join('');
+  list.innerHTML = html || '没有候选项';
 }
 function selectCandidate(id) {
   selected = candidates.find(c => c.id === id);
@@ -228,6 +257,25 @@ def _run_namespace(request: MemoryRunStartRequest, memory_dir: Path) -> Namespac
 
 def _resume_namespace(run_id: str, reviewed: str | None, memory_cards: str | None, memory_dir: Path) -> Namespace:
     return Namespace(run_id=run_id, reviewed=reviewed, memory_cards=memory_cards, reviewer="user", output_dir=str(memory_dir))
+
+
+def _review_progress(state: dict[str, Any]) -> dict[str, Any]:
+    candidates_path = Path(str(state.get("artifacts", {}).get("candidates_path") or ""))
+    candidates = _read_jsonl_dicts(candidates_path) if candidates_path.is_file() else []
+    reviewed_path = Path(str(state["run_dir"])) / "reviewed.jsonl"
+    reviewed = _read_jsonl_dicts(reviewed_path)
+    reviewed_ids = {str(row.get("candidate_id")) for row in reviewed if row.get("candidate_id")}
+    actions: dict[str, int] = {}
+    for row in reviewed:
+        action = str(row.get("action") or row.get("status") or "unknown")
+        actions[action] = actions.get(action, 0) + 1
+    return {
+        "run_id": state["run_id"],
+        "total": len(candidates),
+        "reviewed": len(reviewed_ids),
+        "pending": max(0, len(candidates) - len(reviewed_ids)),
+        "actions": actions,
+    }
 
 
 def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
@@ -316,6 +364,14 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
             raise HTTPException(status_code=404, detail="run not found") from exc
         return {"run_id": run_id, "candidate_id": candidate_id, "trace": read_trace(memory_dir, run_id, candidate_id=candidate_id)}
 
+    @app.get("/api/memory/runs/{run_id}/review-progress")
+    def memory_run_review_progress(run_id: str) -> dict[str, Any]:
+        try:
+            state = load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        return _review_progress(state)
+
     @app.get("/api/memory/runs/{run_id}/candidates")
     def memory_run_candidates(run_id: str) -> dict[str, Any]:
         try:
@@ -323,7 +379,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         candidates_path = Path(str(state.get("artifacts", {}).get("candidates_path") or ""))
-        candidates = _read_jsonl_dicts(candidates_path) if candidates_path.exists() else []
+        candidates = _read_jsonl_dicts(candidates_path) if candidates_path.is_file() else []
         return {"run_id": run_id, "count": len(candidates), "candidates": candidates}
 
     @app.post("/api/memory/runs/{run_id}/review")
@@ -352,7 +408,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         with reviewed_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         append_trace(state, "review_recorded", {"candidate_id": request.candidate_id, "action": request.action, "reviewed_path": str(reviewed_path)})
-        return {"ok": True, "run_id": run_id, "reviewed_path": str(reviewed_path), "review": payload}
+        return {"ok": True, "run_id": run_id, "reviewed_path": str(reviewed_path), "review": payload, "progress": _review_progress(state)}
 
     @app.post("/api/memory/runs/{run_id}/resume")
     def memory_run_resume(run_id: str) -> dict[str, Any]:
