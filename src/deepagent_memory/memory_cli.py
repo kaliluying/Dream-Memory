@@ -18,6 +18,16 @@ from .memory_dreaming import (
     write_jsonl_records,
 )
 from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, write_events_jsonl
+from .memory_runs import (
+    append_trace,
+    copy_input_events,
+    create_run_state,
+    list_runs,
+    load_run_state,
+    read_trace,
+    update_run_state,
+    write_candidate_traces,
+)
 
 
 def _default_project_roots(values: list[str] | None) -> list[Path]:
@@ -102,6 +112,37 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
     pipeline.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
 
+    run = sub.add_parser("run", help="Create a persistent resumable Dream Memory run")
+    run.add_argument("--input", required=True)
+    run.add_argument("--project")
+    run.add_argument("--output-dir")
+    run.add_argument("--memory-cards")
+    run.add_argument("--mode", choices=["ai", "rules"])
+    run.add_argument("--provider")
+    run.add_argument("--model")
+    run.add_argument("--api-key-env")
+    run.add_argument("--base-url")
+    run.add_argument("--timeout-seconds", type=int)
+    run.set_defaults(invoke_model=None)
+    run.add_argument("--dry-run", action="store_false", dest="invoke_model")
+    run.add_argument("--invoke-model", action="store_true", dest="invoke_model")
+
+    status = sub.add_parser("status", help="Show one run state or list runs")
+    status.add_argument("--run-id")
+    status.add_argument("--output-dir")
+
+    resume = sub.add_parser("resume", help="Resume a run after review decisions are available")
+    resume.add_argument("--run-id", required=True)
+    resume.add_argument("--output-dir")
+    resume.add_argument("--reviewed")
+    resume.add_argument("--memory-cards")
+    resume.add_argument("--reviewer", default="user")
+
+    trace = sub.add_parser("trace", help="Print run or candidate trace")
+    trace.add_argument("--run-id", required=True)
+    trace.add_argument("--candidate-id")
+    trace.add_argument("--output-dir")
+
     return parser
 
 
@@ -161,6 +202,104 @@ def _apply_provider_env(args: argparse.Namespace, config: dict[str, object]) -> 
         os.environ["DEEPAGENT_MEMORY_BASE_URL"] = str(base_url)
     if timeout:
         os.environ["DEEPAGENT_MEMORY_TIMEOUT_SECONDS"] = str(timeout)
+
+
+def _run_dream_to_review(
+    *,
+    args: argparse.Namespace,
+    config: dict[str, object],
+    persistent: bool,
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    events = load_events_jsonl(Path(args.input))
+    output_dir = _configured_output_dir(args, config)
+    mode = str(_value(args.mode, config["mode"]))
+    model = _configured_model(args, config)
+    invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
+    _apply_provider_env(args, config)
+    state: dict[str, object] | None = None
+    if persistent:
+        state = create_run_state(memory_dir=output_dir, project=args.project, input_path=str(args.input), mode=mode, model=model, invoke_model=invoke_model)
+        events_path = copy_input_events(args.input, state)
+        state = update_run_state(state, status="running", phase="extracting", artifacts={"events_path": str(events_path)})
+        append_trace(state, "events_copied", {"events_path": str(events_path), "event_count": len(events)})
+        working_dir = Path(str(state["run_dir"]))
+    else:
+        working_dir = output_dir
+    if mode == "ai":
+        extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
+        working_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = working_dir / "agent-prompt.md"
+        prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
+        artifacts = {"agent_prompt_path": str(prompt_path)}
+        if "raw_response" in extraction:
+            raw_path = working_dir / "agent-raw-response.txt"
+            raw_path.write_text(str(extraction["raw_response"]), encoding="utf-8")
+            artifacts["agent_raw_response_path"] = str(raw_path)
+        if state:
+            state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
+            append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
+        result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
+        payload = {**result.to_dict(), "mode": "ai", "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(prompt_path)}
+    else:
+        result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False)
+        payload = {**result.to_dict(), "mode": "rules"}
+        if state:
+            append_trace(state, "rules_extraction_complete", {"candidate_count": result.candidate_count})
+    candidates = load_events_jsonl(Path(result.candidates_path))
+    memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    queue = build_review_queue(candidates, memory_cards)
+    queue_path = write_jsonl_records(queue, working_dir / "review_queue.jsonl")
+    payload = {**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}
+    if state:
+        state = update_run_state(
+            state,
+            status="waiting_review",
+            phase="review",
+            artifacts={
+                "candidates_path": str(result.candidates_path),
+                "dreams_path": str(result.dreams_path),
+                "memory_preview_path": str(result.memory_preview_path),
+                "review_queue_path": str(queue_path),
+            },
+            counts={
+                "event_count": result.event_count,
+                "candidate_count": result.candidate_count,
+                "review_count": len(queue),
+            },
+            next_actions=["review candidates", f"deepagent-memory resume --run-id {state['run_id']}"],
+        )
+        write_candidate_traces(state, candidates)
+        append_trace(state, "waiting_review", {"review_queue_path": str(queue_path), "review_count": len(queue)})
+        payload = {**payload, "run_id": state["run_id"], "run_dir": state["run_dir"], "state_path": str(Path(str(state["run_dir"])) / "state.json")}
+    return payload, state
+
+
+def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
+    output_dir = _configured_output_dir(args, config)
+    state = load_run_state(output_dir, args.run_id)
+    reviewed_path = Path(args.reviewed).expanduser() if args.reviewed else Path(str(state["run_dir"])) / "reviewed.jsonl"
+    reviewed = load_events_jsonl(reviewed_path) if reviewed_path.exists() else []
+    existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
+    cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
+    decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
+    memory_path = output_dir / "MEMORY.md"
+    memory_path.write_text(markdown, encoding="utf-8")
+    state = update_run_state(
+        state,
+        status="completed",
+        phase="applied",
+        artifacts={
+            "reviewed_path": str(reviewed_path),
+            "memory_cards_path": str(cards_path),
+            "review_decisions_path": str(decisions_path),
+            "memory_path": str(memory_path),
+        },
+        counts={"review_decision_count": len(decisions), "memory_count": len(cards)},
+        next_actions=["generate context", "inspect trace"],
+    )
+    append_trace(state, "run_completed", {"reviewed_path": str(reviewed_path), "memory_count": len(cards), "decision_count": len(decisions)})
+    return state
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -226,28 +365,37 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "pipeline":
-        events = load_events_jsonl(Path(args.input))
+        payload, _ = _run_dream_to_review(args=args, config=config, persistent=False)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "run":
+        payload, _ = _run_dream_to_review(args=args, config=config, persistent=True)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "status":
         output_dir = _configured_output_dir(args, config)
-        mode = str(_value(args.mode, config["mode"]))
-        model = _configured_model(args, config)
-        invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
-        _apply_provider_env(args, config)
-        if mode == "ai":
-            extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "agent-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
-            if "raw_response" in extraction:
-                (output_dir / "agent-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
-            result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
-            payload = {**result.to_dict(), "mode": "ai", "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(output_dir / "agent-prompt.md")}
+        if args.run_id:
+            payload = load_run_state(output_dir, args.run_id)
         else:
-            result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=False)
-            payload = {**result.to_dict(), "mode": "rules"}
-        candidates = load_events_jsonl(Path(result.candidates_path))
-        memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
-        queue = build_review_queue(candidates, memory_cards)
-        queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
-        print(json.dumps({**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}, ensure_ascii=False, indent=2))
+            payload = {"runs": list_runs(output_dir)}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "resume":
+        payload = _resume_run(args=args, config=config)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "trace":
+        output_dir = _configured_output_dir(args, config)
+        if args.candidate_id:
+            candidate_path = output_dir / "runs" / args.run_id / "candidates" / f"{args.candidate_id}.json"
+            payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.exists() else {"candidate_id": args.candidate_id, "trace": read_trace(output_dir, args.run_id, candidate_id=args.candidate_id)}
+        else:
+            payload = {"run_id": args.run_id, "trace": read_trace(output_dir, args.run_id)}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "dream":

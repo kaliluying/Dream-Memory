@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from .memory_dreaming import normalize_review_decision
+from .memory_runs import append_trace, list_runs, load_run_state, read_trace
 
 
 class MemoryReviewRequest(BaseModel):
@@ -174,6 +175,63 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
     @app.get("/memory-review", response_class=HTMLResponse)
     def memory_review() -> str:
         return MEMORY_REVIEW_HTML
+
+    @app.get("/api/memory/runs")
+    def memory_runs() -> dict[str, Any]:
+        return {"memory_dir": str(memory_dir), "runs": list_runs(memory_dir)}
+
+    @app.get("/api/memory/runs/{run_id}")
+    def memory_run_state(run_id: str) -> dict[str, Any]:
+        try:
+            return load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+
+    @app.get("/api/memory/runs/{run_id}/trace")
+    def memory_run_trace(run_id: str, candidate_id: str | None = None) -> dict[str, Any]:
+        try:
+            load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        return {"run_id": run_id, "candidate_id": candidate_id, "trace": read_trace(memory_dir, run_id, candidate_id=candidate_id)}
+
+    @app.get("/api/memory/runs/{run_id}/candidates")
+    def memory_run_candidates(run_id: str) -> dict[str, Any]:
+        try:
+            state = load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        candidates_path = Path(str(state.get("artifacts", {}).get("candidates_path") or ""))
+        candidates = _read_jsonl_dicts(candidates_path) if candidates_path.exists() else []
+        return {"run_id": run_id, "count": len(candidates), "candidates": candidates}
+
+    @app.post("/api/memory/runs/{run_id}/review")
+    def memory_run_review_submit(run_id: str, request: MemoryReviewRequest) -> dict[str, Any]:
+        allowed = {"approved", "rejected", "edited_and_approved", "merged", "needs_more_evidence"}
+        if request.action not in allowed:
+            raise HTTPException(status_code=400, detail="invalid review action")
+        try:
+            state = load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        reviewed_path = Path(str(state["run_dir"])) / "reviewed.jsonl"
+        raw_payload = {
+            "candidate_id": request.candidate_id,
+            "action": request.action,
+            "edited_content": request.edited_content,
+            "reviewer": request.reviewer,
+            "note": request.note,
+            "candidate": request.candidate,
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        payload = normalize_review_decision(raw_payload)
+        payload["action"] = request.action
+        payload["edited_content"] = request.edited_content
+        payload["candidate"] = request.candidate
+        with reviewed_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        append_trace(state, "review_recorded", {"candidate_id": request.candidate_id, "action": request.action, "reviewed_path": str(reviewed_path)})
+        return {"ok": True, "run_id": run_id, "reviewed_path": str(reviewed_path), "review": payload}
 
     @app.get("/api/memory/candidates")
     def memory_candidates() -> dict[str, Any]:

@@ -306,6 +306,78 @@ class MemoryCliTests(unittest.TestCase):
             self.assertTrue((output_dir / "agent-prompt.md").exists())
             self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
 
+    def test_run_cli_creates_persistent_run_waiting_for_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events_path.write_text(json.dumps({"event_id": "event_1", "source": "codex", "session_id": "s1", "role": "user", "event_type": "history_prompt", "project": str(root), "content": "这个项目需要人工审核后才能写正式记忆"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"invoke_model": False, "output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(root)])
+
+            self.assertEqual(exit_code, 0)
+            states = list((memory_dir / "runs").glob("*/state.json"))
+            self.assertEqual(len(states), 1)
+            state = json.loads(states[0].read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "waiting_review")
+            self.assertTrue(Path(state["artifacts"]["events_path"]).exists())
+            self.assertTrue(Path(state["artifacts"]["review_queue_path"]).exists())
+            self.assertTrue((Path(state["run_dir"]) / "trace.jsonl").exists())
+
+    def test_status_cli_reads_run_state_and_lists_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events_path.write_text(json.dumps({"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "project": str(root), "content": "这个项目需要人工审核后才能写正式记忆"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"invoke_model": False, "output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(root)])
+            run_id = json.loads(next((memory_dir / "runs").glob("*/state.json")).read_text(encoding="utf-8"))["run_id"]
+
+            self.assertEqual(main(["--config", str(config_path), "status", "--run-id", run_id]), 0)
+            self.assertEqual(main(["--config", str(config_path), "status"]), 0)
+
+    def test_resume_cli_applies_reviewed_decisions_and_completes_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events_path.write_text(json.dumps({"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "project": str(root), "content": "这个项目需要人工审核后才能写正式记忆"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"invoke_model": False, "output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(root), "--mode", "rules"])
+            state_path = next((memory_dir / "runs").glob("*/state.json"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            candidate = json.loads(Path(state["artifacts"]["candidates_path"]).read_text(encoding="utf-8").splitlines()[0])
+            reviewed_path = Path(state["run_dir"]) / "reviewed.jsonl"
+            reviewed_path.write_text(json.dumps({"candidate_id": candidate["id"], "action": "approved", "edited_content": candidate["content"], "reviewer": "user", "candidate": candidate}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "resume", "--run-id", state["run_id"]])
+
+            self.assertEqual(exit_code, 0)
+            completed = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(completed["status"], "completed")
+            self.assertTrue((memory_dir / "memory_cards.jsonl").exists())
+            self.assertTrue((memory_dir / "MEMORY.md").exists())
+
+    def test_trace_cli_prints_run_trace_and_candidate_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events_path.write_text(json.dumps({"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "project": str(root), "content": "这个项目需要人工审核后才能写正式记忆"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"invoke_model": False, "output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(root), "--mode", "rules"])
+            state = json.loads(next((memory_dir / "runs").glob("*/state.json")).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(state["artifacts"]["candidates_path"]).read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertEqual(main(["--config", str(config_path), "trace", "--run-id", state["run_id"]]), 0)
+            self.assertEqual(main(["--config", str(config_path), "trace", "--run-id", state["run_id"], "--candidate-id", candidate["id"]]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

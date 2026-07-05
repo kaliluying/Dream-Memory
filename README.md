@@ -122,6 +122,41 @@ uv run deepagent-memory pipeline   --input .deepagent/memory/imports/all-events.
 
 `pipeline` 默认会调用 AI 生成候选记忆；如果只想生成 `agent-prompt.md` 而不调用模型，添加 `--dry-run`。规则 fallback 可使用 `--mode rules`。
 
+
+## 可恢复 Run 工作流
+
+除了单次 `pipeline`，项目现在支持持久化 run：每次 run 会生成 `run_id`，状态写入 `.deepagent/memory/runs/{run_id}/state.json`，trace 写入 `trace.jsonl`，候选详情写入 `candidates/{candidate_id}.json`。
+
+```bash
+# 创建可恢复 run，执行到 waiting_review 后暂停
+uv run deepagent-memory run \
+  --input .deepagent/memory/imports/all-events.jsonl \
+  --project .
+
+# 查看全部 run
+uv run deepagent-memory status
+
+# 查看单个 run
+uv run deepagent-memory status --run-id <run_id>
+
+# 人工审核后恢复并 apply
+uv run deepagent-memory resume --run-id <run_id>
+
+# 查看 run trace
+uv run deepagent-memory trace --run-id <run_id>
+
+# 查看候选记忆 lineage
+uv run deepagent-memory trace --run-id <run_id> --candidate-id <candidate_id>
+```
+
+Web API 也支持 run 状态查询：
+
+- `GET /api/memory/runs`
+- `GET /api/memory/runs/{run_id}`
+- `GET /api/memory/runs/{run_id}/trace`
+- `GET /api/memory/runs/{run_id}/candidates`
+- `POST /api/memory/runs/{run_id}/review`
+
 ## 输出文件
 
 运行产物默认在 `.deepagent/memory/` 下生成：
