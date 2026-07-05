@@ -1,4 +1,4 @@
-from deepagent_memory.memory_cli import main
+from dream_memory.memory_cli import main
 
 
 if __name__ == "__main__":

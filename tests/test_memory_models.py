@@ -1,4 +1,4 @@
-from deepagent_memory.memory_models import (
+from dream_memory.memory_models import (
     build_atomic_fact,
     build_memory_card,
     build_review_queue_item,

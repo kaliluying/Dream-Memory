@@ -136,12 +136,12 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 tags=["requirement"],
             ))
 
-        if any(token in lowered for token in ["uv", "python", "claude code", "codex", "deepagent", "runtime", "patch"]):
+        if any(token in lowered for token in ["uv", "python", "claude code", "codex", "dream", "runtime", "patch"]):
             tags = [
                 tag for tag, needle in [
                     ("uv", "uv"),
                     ("python", "python"),
-                    ("deepagents", "deepagent"),
+                    ("dreams", "dream"),
                     ("claude-code", "claude code"),
                     ("codex", "codex"),
                     ("patch", "patch"),
@@ -212,14 +212,14 @@ def classify_event(event: dict[str, Any]) -> list[dict[str, Any]]:
             tags=["preference"],
         ))
 
-    if any(token in content for token in ["使用 uv", "uv 管理", "Python", "DeepAgents", "Claude Code", "Codex", "runtime", "patch"]):
+    if any(token in content for token in ["使用 uv", "uv 管理", "Python", "Dreams", "Claude Code", "Codex", "runtime", "patch"]):
         candidates.append(_base_candidate(
             memory_type="project_fact" if project else "global_fact",
             scope="project" if project else "global",
             project=project,
             content=content,
             event=event,
-            tags=[tag for tag in ["uv" if "uv" in lowered else "", "python" if "python" in lowered else "", "deepagents" if "deepagent" in lowered else "", "claude-code" if "claude code" in lowered else "", "codex" if "codex" in lowered else "", "patch" if "patch" in lowered else ""] if tag],
+            tags=[tag for tag in ["uv" if "uv" in lowered else "", "python" if "python" in lowered else "", "dreams" if "dream" in lowered else "", "claude-code" if "claude code" in lowered else "", "codex" if "codex" in lowered else "", "patch" if "patch" in lowered else ""] if tag],
         ))
 
     if role == "user" and any(word in content for word in ["希望", "想", "需要", "不要", "必须"]):
@@ -257,7 +257,7 @@ def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         score += 0.18
     if candidate.get("type") in {"preference", "requirement", "project_fact"}:
         score += 0.18
-    if tags & {"uv", "python", "deepagents", "claude-code", "codex", "patch"}:
+    if tags & {"uv", "python", "dreams", "claude-code", "codex", "patch"}:
         score += 0.12
     if len(content) >= 12:
         score += 0.08
@@ -526,7 +526,7 @@ def dream_from_events(
         candidates = build_candidates_from_facts(facts)
     candidates.sort(key=lambda item: (-item["score"], item["type"], item["content"]))
 
-    candidates_path = output / ("agent-candidates.jsonl" if agent_mode else "candidates.jsonl")
+    candidates_path = output / ("ai-candidates.jsonl" if agent_mode else "candidates.jsonl")
     write_jsonl_records(candidates, candidates_path)
 
     dreams_path = output / "DREAMS.md"

@@ -42,7 +42,7 @@ def _add_source_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="deepagent-memory", description="Scan and import Claude Code / Codex sessions into shared memory events.")
+    parser = argparse.ArgumentParser(prog="dream-memory", description="Scan and import Claude Code / Codex sessions into shared memory events.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Memory config JSON path")
     _add_source_args(parser)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -229,18 +229,18 @@ def _run_dream_to_review(
     if mode == "ai":
         extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
         working_dir.mkdir(parents=True, exist_ok=True)
-        prompt_path = working_dir / "agent-prompt.md"
+        prompt_path = working_dir / "ai-prompt.md"
         prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
-        artifacts = {"agent_prompt_path": str(prompt_path)}
+        artifacts = {"ai_prompt_path": str(prompt_path)}
         if "raw_response" in extraction:
-            raw_path = working_dir / "agent-raw-response.txt"
+            raw_path = working_dir / "ai-raw-response.txt"
             raw_path.write_text(str(extraction["raw_response"]), encoding="utf-8")
-            artifacts["agent_raw_response_path"] = str(raw_path)
+            artifacts["ai_raw_response_path"] = str(raw_path)
         if state:
             state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
             append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
         result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
-        payload = {**result.to_dict(), "mode": "ai", "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(prompt_path)}
+        payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path)}
     else:
         result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False)
         payload = {**result.to_dict(), "mode": "rules"}
@@ -267,7 +267,7 @@ def _run_dream_to_review(
                 "candidate_count": result.candidate_count,
                 "review_count": len(queue),
             },
-            next_actions=["review candidates", f"deepagent-memory resume --run-id {state['run_id']}"],
+            next_actions=["review candidates", f"dream-memory resume --run-id {state['run_id']}"],
         )
         write_candidate_traces(state, candidates)
         append_trace(state, "waiting_review", {"review_queue_path": str(queue_path), "review_count": len(queue)})
@@ -409,9 +409,9 @@ def main(argv: list[str] | None = None) -> int:
         if mode == "ai":
             extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
             output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "agent-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
+            (output_dir / "ai-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
             if "raw_response" in extraction:
-                (output_dir / "agent-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
+                (output_dir / "ai-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
             result = dream_from_events(
                 events,
                 project=args.project,
@@ -420,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
                 agent_candidates=list(extraction.get("candidates", [])),
                 agent_mode=True,
             )
-            payload = {**result.to_dict(), "mode": "ai", "agent": True, "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(output_dir / "agent-prompt.md")}
+            payload = {**result.to_dict(), "mode": "ai", "ai": True, "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(output_dir / "ai-prompt.md")}
         else:
             result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply))
             payload = {**result.to_dict(), "mode": "rules"}

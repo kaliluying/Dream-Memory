@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_memory.memory_agent import (
+from dream_memory.memory_agent import (
     agent_extract_memory_candidates,
     build_memory_extraction_prompt,
     extract_json_payload,

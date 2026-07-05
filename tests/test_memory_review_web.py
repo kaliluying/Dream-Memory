@@ -5,8 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from deepagent_memory.memory_runs import append_trace, create_run_state, update_run_state
-from deepagent_memory.web import create_app
+from dream_memory.memory_runs import append_trace, create_run_state, update_run_state
+from dream_memory.web import create_app
 
 
 class MemoryReviewWebTests(unittest.TestCase):

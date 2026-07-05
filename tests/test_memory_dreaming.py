@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_memory.memory_agent import build_memory_extraction_prompt
-from deepagent_memory.memory_dreaming import (
+from dream_memory.memory_agent import build_memory_extraction_prompt
+from dream_memory.memory_dreaming import (
     DreamResult,
     apply_reviewed_memory,
     build_agent_context,
@@ -19,7 +19,7 @@ from deepagent_memory.memory_dreaming import (
     render_context_markdown,
     score_candidate,
 )
-from deepagent_memory.memory_cli import main
+from dream_memory.memory_cli import main
 
 
 class MemoryDreamingTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class MemoryDreamingTests(unittest.TestCase):
 
     def test_dream_from_events_writes_preview_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / ".deepagent" / "memory"
+            output_dir = Path(tmp) / ".dream" / "memory"
             events = [
                 {
                     "source": "claude_code",
@@ -107,7 +107,7 @@ class MemoryDreamingTests(unittest.TestCase):
                 }, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-            output_dir = root / ".deepagent" / "memory"
+            output_dir = root / ".dream" / "memory"
 
             exit_code = main(["dream", "--input", str(events_path), "--project", str(root), "--output-dir", str(output_dir), "--mode", "rules"])
 
@@ -128,7 +128,7 @@ class MemoryDreamingTests(unittest.TestCase):
 
     def test_dream_from_agent_candidates_writes_agent_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / ".deepagent" / "memory"
+            output_dir = Path(tmp) / ".dream" / "memory"
             events = [{"source": "codex", "content": "希望项目像 Claude Code", "project": str(tmp), "role": "user"}]
             agent_candidates = [
                 {
@@ -148,7 +148,7 @@ class MemoryDreamingTests(unittest.TestCase):
 
             self.assertEqual(result.candidate_count, 1)
             self.assertEqual(result.promoted_count, 1)
-            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
+            self.assertTrue((output_dir / "ai-candidates.jsonl").exists())
             preview = (output_dir / "MEMORY.preview.md").read_text(encoding="utf-8")
             self.assertIn("Claude Code 风格", preview)
 

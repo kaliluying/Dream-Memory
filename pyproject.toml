@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "deepagent-memory"
+name = "dream-memory"
 version = "0.1.0"
-description = "Local CLI for importing, reviewing, and injecting durable agent memory."
+description = "Local CLI for importing, reviewing, and injecting durable AI memory."
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 authors = [{ name = "Gemaolin" }]
@@ -19,7 +19,7 @@ dependencies = [
 dev = []
 
 [project.scripts]
-deepagent-memory = "deepagent_memory.memory_cli:main"
+dream-memory = "dream_memory.memory_cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

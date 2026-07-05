@@ -44,7 +44,7 @@ HOME_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DeepAgent Memory</title>
+  <title>Dream Memory</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f7fb; color: #172033; }
     header { background: #172033; color: white; padding: 24px 32px; }
@@ -56,13 +56,13 @@ HOME_HTML = """
 </head>
 <body>
   <header>
-    <h1>DeepAgent Memory</h1>
+    <h1>Dream Memory</h1>
     <p>本地 agent 记忆控制台：导入会话、审核候选记忆、生成任务上下文。</p>
   </header>
   <main>
     <section>
       <h2>Dream Memory Workflow</h2>
-      <p>使用 <code>deepagent-memory</code> CLI 运行 scan/import/dream/run/status/resume/trace。</p>
+      <p>使用 <code>dream-memory</code> CLI 运行 scan/import/dream/run/status/resume/trace。</p>
       <p><a href="/memory-review">打开候选记忆审核界面</a></p>
     </section>
   </main>
@@ -248,9 +248,9 @@ def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_dir: Path | str = ".deepagent/memory") -> FastAPI:
+def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_dir: Path | str = ".dream-memory") -> FastAPI:
     memory_dir = Path(default_memory_dir).expanduser()
-    app = FastAPI(title="DeepAgent Memory", version="0.1.0")
+    app = FastAPI(title="Dream Memory", version="0.1.0")
 
     @app.get("/", response_class=HTMLResponse)
     def home() -> str:
@@ -365,7 +365,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
 
     @app.get("/api/memory/candidates")
     def memory_candidates() -> dict[str, Any]:
-        candidates_path = memory_dir / "agent-candidates.jsonl"
+        candidates_path = memory_dir / "ai-candidates.jsonl"
         if not candidates_path.exists():
             candidates_path = memory_dir / "candidates.jsonl"
         candidates = _read_jsonl_dicts(candidates_path)

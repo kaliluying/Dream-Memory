@@ -186,8 +186,8 @@ def write_candidate_traces(state: dict[str, Any], candidates: list[dict[str, Any
             "candidate": candidate,
             "lineage": {
                 "events_path": state.get("artifacts", {}).get("events_path"),
-                "prompt_path": state.get("artifacts", {}).get("agent_prompt_path"),
-                "raw_response_path": state.get("artifacts", {}).get("agent_raw_response_path"),
+                "prompt_path": state.get("artifacts", {}).get("ai_prompt_path"),
+                "raw_response_path": state.get("artifacts", {}).get("ai_raw_response_path"),
                 "candidates_path": state.get("artifacts", {}).get("candidates_path"),
             },
         }

@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deepagent_memory.memory_graph import build_memory_extraction_graph, run_memory_extraction_graph
+from dream_memory.memory_graph import build_memory_extraction_graph, run_memory_extraction_graph
 
 
 class MemoryGraphTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class MemoryGraphTests(unittest.TestCase):
             }]
         }, ensure_ascii=False)
 
-        with patch("deepagent_memory.memory_graph.invoke_model_provider", return_value=raw):
+        with patch("dream_memory.memory_graph.invoke_model_provider", return_value=raw):
             result = run_memory_extraction_graph(
                 [{"source": "codex", "role": "user", "content": "始终中文回答"}],
                 project="/tmp/project",

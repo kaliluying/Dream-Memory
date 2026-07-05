@@ -1,6 +1,6 @@
-# DeepAgent Memory
+# Dream Memory
 
-DeepAgent Memory 是一个本地 Dream Memory / 梦境记忆系统，用来从 Claude Code / Codex 会话材料中导入事件、生成候选记忆、人工审核，并把正式记忆注入后续 agent 上下文。
+Dream Memory 是一个本地 Dream Memory / 梦境记忆系统，用来从 Claude Code / Codex 会话材料中导入事件、生成候选记忆、人工审核，并把正式记忆注入后续 AI 上下文。
 
 ## 功能
 
@@ -14,14 +14,14 @@ AI 抽取路径由 LangGraph 状态图编排：`build_prompt -> invoke_model -> 
 - 通过 review queue 进行人工审核
 - 将审核后的正式记忆写入 `memory_cards.jsonl`
 - 派生生成可读的 `MEMORY.md`
-- 按项目生成 agent 可用上下文
+- 按项目生成 AI 可用上下文
 - 提供 FastAPI 审核页面 `/memory-review`
 
 ## 安装与运行
 
 ```bash
 uv sync
-uv run deepagent-memory --help
+uv run dream-memory --help
 ```
 
 
@@ -35,16 +35,16 @@ uv run deepagent-memory --help
 
 ## 配置文件
 
-默认配置路径是 `.deepagent/memory/config.json`。先生成可编辑配置：
+默认配置路径是 `.dream-memory/config.json`。先生成可编辑配置：
 
 ```bash
-uv run deepagent-memory init-config
+uv run dream-memory init-config
 ```
 
 也可以指定位置：
 
 ```bash
-uv run deepagent-memory --config ./memory-config.json init-config --output ./memory-config.json
+uv run dream-memory --config ./memory-config.json init-config --output ./memory-config.json
 ```
 
 配置示例：
@@ -58,9 +58,9 @@ uv run deepagent-memory --config ./memory-config.json init-config --output ./mem
   "timeout_seconds": 60,
   "invoke_model": true,
   "mode": "ai",
-  "output_dir": ".deepagent/memory",
-  "imports_output_dir": ".deepagent/memory/imports",
-  "memory_cards": ".deepagent/memory/memory_cards.jsonl",
+  "output_dir": ".dream-memory",
+  "imports_output_dir": ".dream-memory/imports",
+  "memory_cards": ".dream-memory/memory_cards.jsonl",
   "context_limit": 12,
   "context_format": "json",
   "codex_home": "~/.codex",
@@ -72,8 +72,8 @@ uv run deepagent-memory --config ./memory-config.json init-config --output ./mem
 命令行参数优先级高于配置文件。例如临时切模型：
 
 ```bash
-uv run deepagent-memory --config .deepagent/memory/config.json pipeline \
-  --input .deepagent/memory/imports/all-events.jsonl \
+uv run dream-memory --config .dream-memory/config.json pipeline \
+  --input .dream-memory/imports/all-events.jsonl \
   --provider openai \
   --model gpt-4.1
 ```
@@ -90,63 +90,63 @@ export OPENAI_API_KEY="你的 key"
 
 ```bash
 # 1. 扫描可用来源
-uv run deepagent-memory scan --output .deepagent/memory/scan.json
+uv run dream-memory scan --output .dream-memory/scan.json
 
 # 2. 导入事件
-uv run deepagent-memory import all --output-dir .deepagent/memory/imports --dry-run
+uv run dream-memory import all --output-dir .dream-memory/imports --dry-run
 
 # 3. 默认 AI 梦境抽取：只生成 prompt，不调用模型
-uv run deepagent-memory dream   --input .deepagent/memory/imports/all-events.jsonl   --project .   --output-dir .deepagent/memory
+uv run dream-memory dream   --input .dream-memory/imports/all-events.jsonl   --project .   --output-dir .dream-memory
 
 # 4. 调用模型生成候选记忆
-uv run deepagent-memory dream   --input .deepagent/memory/imports/all-events.jsonl   --project .   --output-dir .deepagent/memory   --invoke-model
+uv run dream-memory dream   --input .dream-memory/imports/all-events.jsonl   --project .   --output-dir .dream-memory   --invoke-model
 
 # 5. 如需规则 fallback/debug
-uv run deepagent-memory dream   --input .deepagent/memory/imports/all-events.jsonl   --project .   --output-dir .deepagent/memory   --mode rules
+uv run dream-memory dream   --input .dream-memory/imports/all-events.jsonl   --project .   --output-dir .dream-memory   --mode rules
 
 # 6. 生成审核队列
-uv run deepagent-memory review   --candidates .deepagent/memory/agent-candidates.jsonl   --memory-cards .deepagent/memory/memory_cards.jsonl   --output-dir .deepagent/memory
+uv run dream-memory review   --candidates .dream-memory/ai-candidates.jsonl   --memory-cards .dream-memory/memory_cards.jsonl   --output-dir .dream-memory
 
 # 7. 应用人工审核结果
-uv run deepagent-memory apply   --reviewed .deepagent/memory/reviewed.jsonl   --memory-cards .deepagent/memory/memory_cards.jsonl   --output-dir .deepagent/memory   --reviewer user
+uv run dream-memory apply   --reviewed .dream-memory/reviewed.jsonl   --memory-cards .dream-memory/memory_cards.jsonl   --output-dir .dream-memory   --reviewer user
 
-# 8. 生成 agent 上下文
-uv run deepagent-memory context   --project .   --memory-cards .deepagent/memory/memory_cards.jsonl   --limit 12   --format markdown
+# 8. 生成 AI 上下文
+uv run dream-memory context   --project .   --memory-cards .dream-memory/memory_cards.jsonl   --limit 12   --format markdown
 ```
 
 ## 一键流程
 
 ```bash
-uv run deepagent-memory pipeline   --input .deepagent/memory/imports/all-events.jsonl   --project .   --output-dir .deepagent/memory
+uv run dream-memory pipeline   --input .dream-memory/imports/all-events.jsonl   --project .   --output-dir .dream-memory
 ```
 
-`pipeline` 默认会调用 AI 生成候选记忆；如果只想生成 `agent-prompt.md` 而不调用模型，添加 `--dry-run`。规则 fallback 可使用 `--mode rules`。
+`pipeline` 默认会调用 AI 生成候选记忆；如果只想生成 `ai-prompt.md` 而不调用模型，添加 `--dry-run`。规则 fallback 可使用 `--mode rules`。
 
 
 ## 可恢复 Run 工作流
 
-除了单次 `pipeline`，项目现在支持持久化 run：每次 run 会生成 `run_id`，状态写入 `.deepagent/memory/runs/{run_id}/state.json`，trace 写入 `trace.jsonl`，候选详情写入 `candidates/{candidate_id}.json`。
+除了单次 `pipeline`，项目现在支持持久化 run：每次 run 会生成 `run_id`，状态写入 `.dream-memory/runs/{run_id}/state.json`，trace 写入 `trace.jsonl`，候选详情写入 `candidates/{candidate_id}.json`。
 
 ```bash
 # 创建可恢复 run，执行到 waiting_review 后暂停
-uv run deepagent-memory run \
-  --input .deepagent/memory/imports/all-events.jsonl \
+uv run dream-memory run \
+  --input .dream-memory/imports/all-events.jsonl \
   --project .
 
 # 查看全部 run
-uv run deepagent-memory status
+uv run dream-memory status
 
 # 查看单个 run
-uv run deepagent-memory status --run-id <run_id>
+uv run dream-memory status --run-id <run_id>
 
 # 人工审核后恢复并 apply
-uv run deepagent-memory resume --run-id <run_id>
+uv run dream-memory resume --run-id <run_id>
 
 # 查看 run trace
-uv run deepagent-memory trace --run-id <run_id>
+uv run dream-memory trace --run-id <run_id>
 
 # 查看候选记忆 lineage
-uv run deepagent-memory trace --run-id <run_id> --candidate-id <candidate_id>
+uv run dream-memory trace --run-id <run_id> --candidate-id <candidate_id>
 ```
 
 Web API 也支持 run 状态查询：
@@ -162,11 +162,11 @@ Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 
 
 ## 输出文件
 
-运行产物默认在 `.deepagent/memory/` 下生成：
+运行产物默认在 `.dream-memory/` 下生成：
 
 - `facts.jsonl`：规则模式下的 atomic facts，或安全/审计辅助文件
-- `agent-prompt.md`：AI 候选记忆抽取 prompt
-- `agent-candidates.jsonl`：AI 候选记忆
+- `ai-prompt.md`：AI 候选记忆抽取 prompt
+- `ai-candidates.jsonl`：AI 候选记忆
 - `candidates.jsonl`：规则 fallback 候选记忆
 - `review_queue.jsonl`：待人工审核队列
 - `reviewed.jsonl`：Web/人工审核提交
@@ -174,12 +174,12 @@ Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 
 - `memory_cards.jsonl`：正式记忆卡片状态
 - `MEMORY.md`：正式记忆的人类可读投影
 
-`.deepagent/memory/` 下的运行产物已被 `.gitignore` 忽略，只保留 `.gitkeep`。
+`.dream-memory/` 下的运行产物已被 `.gitignore` 忽略，只保留 `.gitkeep`。
 
 ## Web 审核界面
 
 ```bash
-uv run uvicorn deepagent_memory.web:app --reload
+uv run uvicorn dream_memory.web:app --reload
 ```
 
 打开：
@@ -191,10 +191,10 @@ http://127.0.0.1:8000/memory-review
 ## 当前源码结构
 
 ```text
-src/deepagent_memory/
+src/dream_memory/
 ├── __init__.py
 ├── memory_agent.py       # AI prompt、模型输出解析、候选校验
-├── memory_cli.py         # deepagent-memory CLI
+├── memory_cli.py         # dream-memory CLI
 ├── memory_dreaming.py    # 安全过滤、候选/审核/应用/context 核心逻辑
 ├── memory_importers.py   # Claude/Codex 会话导入
 ├── memory_models.py      # 记忆数据结构 builders

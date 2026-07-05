@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_memory.memory_cli import build_parser, main
+from dream_memory.memory_cli import build_parser, main
 
 
 class MemoryCliTests(unittest.TestCase):
@@ -69,7 +69,7 @@ class MemoryCliTests(unittest.TestCase):
             exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir), "--agent", "--dry-run"])
 
             self.assertEqual(exit_code, 0)
-            self.assertTrue((output_dir / "agent-prompt.md").exists())
+            self.assertTrue((output_dir / "ai-prompt.md").exists())
             self.assertTrue((output_dir / "DREAMS.md").exists())
 
     def test_extract_facts_cli_writes_facts_jsonl(self):
@@ -239,7 +239,7 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "facts.jsonl").exists())
-            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
+            self.assertTrue((output_dir / "ai-candidates.jsonl").exists())
             self.assertTrue((output_dir / "review_queue.jsonl").exists())
 
     def test_dream_dry_run_writes_prompt_without_rule_candidates(self):
@@ -252,8 +252,8 @@ class MemoryCliTests(unittest.TestCase):
             exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir), "--dry-run"])
 
             self.assertEqual(exit_code, 0)
-            self.assertTrue((output_dir / "agent-prompt.md").exists())
-            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
+            self.assertTrue((output_dir / "ai-prompt.md").exists())
+            self.assertTrue((output_dir / "ai-candidates.jsonl").exists())
             self.assertFalse((output_dir / "candidates.jsonl").exists())
 
     def test_dream_rules_mode_preserves_rule_candidate_generation(self):
@@ -267,7 +267,7 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "candidates.jsonl").exists())
-            self.assertFalse((output_dir / "agent-candidates.jsonl").exists())
+            self.assertFalse((output_dir / "ai-candidates.jsonl").exists())
 
     def test_ai_mode_uses_config_default_and_dry_run_disables_it(self):
         parser = build_parser()
@@ -303,8 +303,8 @@ class MemoryCliTests(unittest.TestCase):
             exit_code = main(["--config", str(config_path), "dream", "--input", str(events), "--project", str(root)])
 
             self.assertEqual(exit_code, 0)
-            self.assertTrue((output_dir / "agent-prompt.md").exists())
-            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
+            self.assertTrue((output_dir / "ai-prompt.md").exists())
+            self.assertTrue((output_dir / "ai-candidates.jsonl").exists())
 
     def test_run_cli_creates_persistent_run_waiting_for_review(self):
         with tempfile.TemporaryDirectory() as tmp:

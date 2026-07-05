@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CONFIG_PATH = Path(".deepagent/memory/config.json")
+DEFAULT_CONFIG_PATH = Path(".dream-memory/config.json")
 
 DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "provider": "anthropic",
@@ -14,9 +14,9 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "timeout_seconds": 60,
     "invoke_model": True,
     "mode": "ai",
-    "output_dir": ".deepagent/memory",
-    "imports_output_dir": ".deepagent/memory/imports",
-    "memory_cards": ".deepagent/memory/memory_cards.jsonl",
+    "output_dir": ".dream-memory",
+    "imports_output_dir": ".dream-memory/imports",
+    "memory_cards": ".dream-memory/memory_cards.jsonl",
     "context_limit": 12,
     "context_format": "json",
     "codex_home": "~/.codex",

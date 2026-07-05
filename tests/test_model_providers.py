@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deepagent_memory.model_providers import StaticModelProvider, parse_model_ref
+from dream_memory.model_providers import StaticModelProvider, parse_model_ref
 
 
 class ModelProviderTests(unittest.TestCase):

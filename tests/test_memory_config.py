@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deepagent_memory.memory_config import DEFAULT_MEMORY_CONFIG, load_memory_config, write_default_memory_config
+from dream_memory.memory_config import DEFAULT_MEMORY_CONFIG, load_memory_config, write_default_memory_config
 
 
 class MemoryConfigTests(unittest.TestCase):
@@ -13,7 +13,7 @@ class MemoryConfigTests(unittest.TestCase):
 
             self.assertEqual(config["model"], DEFAULT_MEMORY_CONFIG["model"])
             self.assertTrue(config["invoke_model"])
-            self.assertEqual(config["output_dir"], ".deepagent/memory")
+            self.assertEqual(config["output_dir"], ".dream-memory")
 
     def test_load_memory_config_merges_json_over_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
