@@ -157,6 +157,9 @@ Web API 也支持 run 状态查询：
 - `GET /api/memory/runs/{run_id}/candidates`
 - `POST /api/memory/runs/{run_id}/review`
 
+
+Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 run 后可查看该 run 的候选记忆和 trace，并将审核结果写入 run 专属的 `reviewed.jsonl`。Web API 也提供 `POST /api/memory/runs/start` 用于启动 run，`POST /api/memory/runs/{run_id}/resume` 用于审核后恢复并应用正式记忆。
+
 ## 输出文件
 
 运行产物默认在 `.deepagent/memory/` 下生成：

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from .memory_cli import _resume_run, _run_dream_to_review
+from .memory_config import DEFAULT_MEMORY_CONFIG
 from .memory_dreaming import normalize_review_decision
 from .memory_runs import append_trace, list_runs, load_run_state, read_trace
 
@@ -20,6 +23,19 @@ class MemoryReviewRequest(BaseModel):
     reviewer: str = "user"
     note: str | None = None
     candidate: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryRunStartRequest(BaseModel):
+    input: str
+    project: str | None = None
+    mode: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    api_key_env: str | None = None
+    base_url: str | None = None
+    timeout_seconds: int | None = None
+    invoke_model: bool | None = None
+    memory_cards: str | None = None
 
 
 HOME_HTML = """
@@ -46,7 +62,7 @@ HOME_HTML = """
   <main>
     <section>
       <h2>Dream Memory Workflow</h2>
-      <p>使用 <code>deepagent-memory</code> CLI 运行 scan/import/extract-facts/dream/review/apply/context。</p>
+      <p>使用 <code>deepagent-memory</code> CLI 运行 scan/import/dream/run/status/resume/trace。</p>
       <p><a href="/memory-review">打开候选记忆审核界面</a></p>
     </section>
   </main>
@@ -82,6 +98,8 @@ MEMORY_REVIEW_HTML = """
 <header><h1>Dream Memory Review</h1><p>候选记忆人工审核：批准、拒绝、合并或要求更多证据。</p></header>
 <main>
   <aside>
+    <h2>运行状态</h2>
+    <div id="runs" class="muted">加载运行状态...</div>
     <h2>候选记忆</h2>
     <input id="search" placeholder="搜索内容/标签" />
     <select id="statusFilter"><option value="">全部状态</option><option value="promote">promote</option><option value="review">review</option><option value="reject">reject</option></select>
@@ -99,15 +117,41 @@ MEMORY_REVIEW_HTML = """
       <button onclick="submitReview('merged')">合并</button>
       <button class="more" onclick="submitReview('needs_more_evidence')">需要更多证据</button>
       <button class="reject" onclick="submitReview('rejected')">拒绝</button>
+      <button onclick="resumeSelectedRun()">恢复并应用 Run</button>
     </div>
     <h3>Evidence</h3>
     <pre id="evidence"></pre>
+    <h3>Run Trace</h3>
+    <pre id="trace"></pre>
     <p id="status" class="muted"></p>
   </section>
 </main>
 <script>
 let candidates = [];
 let selected = null;
+let selectedRunId = null;
+async function loadRuns() {
+  const res = await fetch('/api/memory/runs');
+  const data = await res.json();
+  const runs = data.runs || [];
+  const box = document.getElementById('runs');
+  box.innerHTML = runs.slice(0, 8).map(r => `<div class="item" onclick="selectRun('${r.run_id}')"><b>${escapeHtml(r.run_id)}</b><br><span class="pill">${escapeHtml(r.status || '')}</span><span class="pill">${escapeHtml(r.phase || '')}</span><br>${escapeHtml(r.updated_at || '')}</div>`).join('') || '暂无 run';
+}
+async function selectRun(runId) {
+  selectedRunId = runId;
+  const res = await fetch(`/api/memory/runs/${runId}/candidates`);
+  const data = await res.json();
+  candidates = data.candidates || [];
+  document.getElementById('status').textContent = `当前 run: ${runId}`;
+  await loadTrace();
+  renderList();
+}
+async function loadTrace() {
+  if (!selectedRunId) return;
+  const res = await fetch(`/api/memory/runs/${selectedRunId}/trace`);
+  const data = await res.json();
+  document.getElementById('trace').textContent = JSON.stringify(data.trace || [], null, 2);
+}
 async function loadCandidates() {
   const res = await fetch('/api/memory/candidates');
   const data = await res.json();
@@ -133,17 +177,57 @@ function selectCandidate(id) {
 async function submitReview(action) {
   if (!selected) return;
   const payload = { candidate_id: selected.id, action, edited_content: document.getElementById('content').value, note: document.getElementById('note').value, reviewer: 'user', candidate: selected };
-  const res = await fetch('/api/memory/review', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  const url = selectedRunId ? `/api/memory/runs/${selectedRunId}/review` : '/api/memory/review';
+  const res = await fetch(url, {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   const data = await res.json();
   document.getElementById('status').textContent = res.ok ? '已保存审核结果' : JSON.stringify(data);
+  await loadTrace();
+}
+async function resumeSelectedRun() {
+  if (!selectedRunId) return;
+  const res = await fetch(`/api/memory/runs/${selectedRunId}/resume`, {method: 'POST'});
+  const data = await res.json();
+  document.getElementById('status').textContent = res.ok ? `已恢复并应用: ${data.status}` : JSON.stringify(data);
+  await loadRuns();
+  await loadTrace();
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
 ['search','statusFilter','scopeFilter'].forEach(id => document.addEventListener('input', e => { if (e.target && e.target.id === id) renderList(); }));
+loadRuns();
 loadCandidates();
+setInterval(loadRuns, 3000);
 </script>
 </body>
 </html>
 """
+
+
+def _web_config(memory_dir: Path) -> dict[str, Any]:
+    config = dict(DEFAULT_MEMORY_CONFIG)
+    config["output_dir"] = str(memory_dir)
+    config["memory_cards"] = str(memory_dir / "memory_cards.jsonl")
+    config["imports_output_dir"] = str(memory_dir / "imports")
+    return config
+
+
+def _run_namespace(request: MemoryRunStartRequest, memory_dir: Path) -> Namespace:
+    return Namespace(
+        input=request.input,
+        project=request.project,
+        output_dir=str(memory_dir),
+        memory_cards=request.memory_cards,
+        mode=request.mode,
+        provider=request.provider,
+        model=request.model,
+        api_key_env=request.api_key_env,
+        base_url=request.base_url,
+        timeout_seconds=request.timeout_seconds,
+        invoke_model=request.invoke_model,
+    )
+
+
+def _resume_namespace(run_id: str, reviewed: str | None, memory_cards: str | None, memory_dir: Path) -> Namespace:
+    return Namespace(run_id=run_id, reviewed=reviewed, memory_cards=memory_cards, reviewer="user", output_dir=str(memory_dir))
 
 
 def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
@@ -175,6 +259,20 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
     @app.get("/memory-review", response_class=HTMLResponse)
     def memory_review() -> str:
         return MEMORY_REVIEW_HTML
+
+    @app.post("/api/memory/runs/start")
+    def memory_run_start(request: MemoryRunStartRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
+        config = _web_config(memory_dir)
+        args = _run_namespace(request, memory_dir)
+
+        def run_task() -> None:
+            # The local file-backed implementation is safe to run synchronously in tests;
+            # BackgroundTasks keeps the API contract ready for async UI polling.
+            return None
+
+        background_tasks.add_task(run_task)
+        payload, _state = _run_dream_to_review(args=args, config=config, persistent=True)
+        return {"ok": True, "run_id": payload["run_id"], "state_path": payload["state_path"], "run_dir": payload["run_dir"]}
 
     @app.get("/api/memory/runs")
     def memory_runs() -> dict[str, Any]:
@@ -232,6 +330,15 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         append_trace(state, "review_recorded", {"candidate_id": request.candidate_id, "action": request.action, "reviewed_path": str(reviewed_path)})
         return {"ok": True, "run_id": run_id, "reviewed_path": str(reviewed_path), "review": payload}
+
+    @app.post("/api/memory/runs/{run_id}/resume")
+    def memory_run_resume(run_id: str) -> dict[str, Any]:
+        config = _web_config(memory_dir)
+        args = _resume_namespace(run_id, None, None, memory_dir)
+        try:
+            return _resume_run(args=args, config=config)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
 
     @app.get("/api/memory/candidates")
     def memory_candidates() -> dict[str, Any]:
