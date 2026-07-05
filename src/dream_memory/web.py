@@ -144,13 +144,28 @@ async function loadRuns() {
 }
 async function selectRun(runId) {
   selectedRunId = runId;
-  const res = await fetch(`/api/memory/runs/${runId}/candidates`);
-  const data = await res.json();
-  candidates = data.candidates || [];
+  await loadReviewQueue(runId);
   document.getElementById('status').textContent = `当前 run: ${runId}`;
   await loadReviewProgress();
   await loadTrace();
   renderList();
+}
+async function loadReviewQueue(runId) {
+  const res = await fetch(`/api/memory/runs/${runId}/review-queue`);
+  const data = await res.json();
+  const items = data.items || [];
+  if (items.length) {
+    candidates = items.map(item => Object.assign({}, item.candidate || {}, {
+      conflicts: item.conflicts || [],
+      review_queue_status: item.status,
+      suggested_action: item.suggested_action,
+      candidate_id: item.candidate_id
+    }));
+    return;
+  }
+  const fallback = await fetch(`/api/memory/runs/${runId}/candidates`);
+  const fallbackData = await fallback.json();
+  candidates = fallbackData.candidates || [];
 }
 async function loadReviewProgress() {
   if (!selectedRunId) return;
@@ -182,7 +197,8 @@ function groupCandidates(items) {
 function candidateHtml(c) {
   const conflictCount = (c.conflicts || []).length;
   const conflict = conflictCount ? `<span class="pill">conflicts ${conflictCount}</span>` : '';
-  return `<div class="item ${selected && selected.id === c.id ? 'active' : ''}" onclick="selectCandidate('${c.id}')"><b>${escapeHtml(c.type || '')}</b><br>${escapeHtml((c.content || '').slice(0, 120))}<br><span class="pill">${escapeHtml(c.scope || '')}</span><span class="pill">${escapeHtml(String(c.score || ''))}</span>${conflict}</div>`;
+  const suggestion = c.suggested_action ? `<span class="pill">${escapeHtml(c.suggested_action)}</span>` : '';
+  return `<div class="item ${selected && selected.id === c.id ? 'active' : ''}" onclick="selectCandidate('${c.id}')"><b>${escapeHtml(c.type || '')}</b><br>${escapeHtml((c.content || '').slice(0, 120))}<br><span class="pill">${escapeHtml(c.scope || '')}</span><span class="pill">${escapeHtml(String(c.score || ''))}</span>${suggestion}${conflict}</div>`;
 }
 function renderList() {
   const q = document.getElementById('search').value.toLowerCase();
@@ -200,7 +216,7 @@ function selectCandidate(id) {
   document.getElementById('title').textContent = selected.type + ' / ' + selected.id;
   document.getElementById('meta').textContent = `${selected.scope || ''} ${selected.project || ''} ${selected.status || ''}`;
   document.getElementById('content').value = selected.content || '';
-  document.getElementById('evidence').textContent = JSON.stringify(selected.evidence || [], null, 2);
+  document.getElementById('evidence').textContent = JSON.stringify({evidence: selected.evidence || [], conflicts: selected.conflicts || []}, null, 2);
   renderList();
 }
 async function submitReview(action) {
@@ -363,6 +379,16 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         return {"run_id": run_id, "candidate_id": candidate_id, "trace": read_trace(memory_dir, run_id, candidate_id=candidate_id)}
+
+    @app.get("/api/memory/runs/{run_id}/review-queue")
+    def memory_run_review_queue(run_id: str) -> dict[str, Any]:
+        try:
+            state = load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
+        items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        return {"run_id": run_id, "count": len(items), "items": items}
 
     @app.get("/api/memory/runs/{run_id}/review-progress")
     def memory_run_review_progress(run_id: str) -> dict[str, Any]:

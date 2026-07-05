@@ -267,6 +267,44 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertIn("groupCandidates", response.text)
             self.assertIn("候选分组", response.text)
 
+    def test_api_memory_run_review_queue_returns_conflicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="ai", model="anthropic:test", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({
+                "candidate_id": "cand_1",
+                "status": "pending",
+                "suggested_action": "review",
+                "candidate": {"id": "cand_1", "status": "review", "type": "decision", "content": "项目目标是本地记忆系统。"},
+                "conflicts": [{"memory_id": "mem_1", "reason": "same-scope-type-different-summary"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get(f"/api/memory/runs/{state['run_id']}/review-queue")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["count"], 1)
+            self.assertEqual(payload["items"][0]["candidate_id"], "cand_1")
+            self.assertEqual(payload["items"][0]["conflicts"][0]["memory_id"], "mem_1")
+
+    def test_memory_review_page_uses_review_queue_for_run_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get("/memory-review")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("loadReviewQueue", response.text)
+            self.assertIn("review-queue", response.text)
+            self.assertIn("conflicts", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()
