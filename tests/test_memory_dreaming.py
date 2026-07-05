@@ -109,7 +109,7 @@ class MemoryDreamingTests(unittest.TestCase):
             )
             output_dir = root / ".deepagent" / "memory"
 
-            exit_code = main(["dream", "--input", str(events_path), "--project", str(root), "--output-dir", str(output_dir)])
+            exit_code = main(["dream", "--input", str(events_path), "--project", str(root), "--output-dir", str(output_dir), "--mode", "rules"])
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "candidates.jsonl").exists())

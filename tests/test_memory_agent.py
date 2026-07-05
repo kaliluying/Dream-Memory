@@ -7,6 +7,7 @@ from deepagent_memory.memory_agent import (
     agent_extract_memory_candidates,
     build_memory_extraction_prompt,
     extract_json_payload,
+    validate_agent_candidates,
 )
 
 
@@ -72,3 +73,34 @@ class MemoryAgentTests(unittest.TestCase):
         self.assertFalse(result["dry_run"])
         self.assertEqual(result["candidates"][0]["decision"], "promote")
         self.assertIn("Claude Code", result["candidates"][0]["content"])
+
+    def test_validate_agent_candidates_drops_invalid_and_secret_content(self):
+        candidates = [
+            {
+                "content": "用户偏好中文回答。",
+                "type": "preference",
+                "scope": "user",
+                "project": None,
+                "confidence": 0.95,
+                "decision": "promote",
+                "reason": "explicit preference",
+                "evidence": [{"event_id": "event_1", "source": "codex"}],
+                "tags": ["language"],
+            },
+            {
+                "content": "OPENAI_API_KEY=sk-secret-value",
+                "type": "preference",
+                "scope": "user",
+                "confidence": 0.9,
+                "decision": "promote",
+                "evidence": [{"event_id": "event_2"}],
+            },
+            {"content": "缺少 evidence", "type": "preference", "scope": "user", "decision": "promote"},
+        ]
+
+        valid = validate_agent_candidates(candidates, project="/tmp/project")
+
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(valid[0]["content"], "用户偏好中文回答。")
+        self.assertEqual(valid[0]["status"], "promote")
+        self.assertEqual(valid[0]["score"], 0.95)

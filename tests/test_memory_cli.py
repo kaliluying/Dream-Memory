@@ -239,8 +239,35 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "facts.jsonl").exists())
-            self.assertTrue((output_dir / "candidates.jsonl").exists())
+            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
             self.assertTrue((output_dir / "review_queue.jsonl").exists())
+
+    def test_dream_defaults_to_ai_dry_run_prompt_without_rule_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            events.write_text(json.dumps({"source": "codex", "role": "user", "content": "希望项目像 Claude Code", "project": "/tmp/p"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            output_dir = root / "memory"
+
+            exit_code = main(["dream", "--input", str(events), "--project", "/tmp/p", "--output-dir", str(output_dir)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_dir / "agent-prompt.md").exists())
+            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
+            self.assertFalse((output_dir / "candidates.jsonl").exists())
+
+    def test_dream_rules_mode_preserves_rule_candidate_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            events.write_text(json.dumps({"source": "codex", "role": "user", "event_type": "history_prompt", "content": "这个项目需要人工审核后才能写正式记忆", "project": str(root)}, ensure_ascii=False) + "\n", encoding="utf-8")
+            output_dir = root / "memory"
+
+            exit_code = main(["dream", "--input", str(events), "--project", str(root), "--output-dir", str(output_dir), "--mode", "rules"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_dir / "candidates.jsonl").exists())
+            self.assertFalse((output_dir / "agent-candidates.jsonl").exists())
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -7,6 +8,13 @@ from typing import Any
 
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<json>\{.*?\})\s*```", re.DOTALL)
+SENSITIVE_RE = re.compile(
+    r"(sk-[a-zA-Z0-9]|api[_-]?key\s*[=:]|access[_-]?token\s*[=:]|refresh[_-]?token\s*[=:]|password\s*[=:]|secret\s*[=:]|cookie\s*[=:]|bearer\s+[a-zA-Z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)",
+    re.I,
+)
+ALLOWED_MEMORY_TYPES = {"preference", "project_fact", "decision", "workflow", "pitfall", "requirement", "rejected_option", "product_direction", "global_fact"}
+ALLOWED_SCOPES = {"user", "global", "project", "session"}
+ALLOWED_DECISIONS = {"promote", "review", "reject"}
 
 
 def _event_preview(events: list[dict[str, Any]], limit: int = 80) -> list[dict[str, Any]]:
@@ -44,7 +52,7 @@ Return JSON only with this schema:
     {{
       "content": "short durable memory",
       "type": "preference|project_fact|decision|workflow|pitfall|requirement|rejected_option|product_direction",
-      "scope": "global|project",
+      "scope": "user|global|project|session",
       "project": "project path or null",
       "confidence": 0.0,
       "decision": "promote|review|reject",
@@ -82,6 +90,91 @@ def extract_json_payload(text: str) -> dict[str, Any]:
     if not isinstance(payload.get("candidates"), list):
         payload["candidates"] = []
     return payload
+
+
+def _stable_candidate_id(content: str, scope: str, project: str | None) -> str:
+    raw = f"{scope}|{project or ''}|{content}".encode("utf-8")
+    return "mem_" + hashlib.sha1(raw).hexdigest()[:12]
+
+
+def _normalize_text(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value).strip().lower())
+    text = re.sub(r"[。．.!！?？,，;；:：]+$", "", text)
+    return text.strip()
+
+
+def _coerce_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = 0.5
+    return max(0.0, min(1.0, round(confidence, 3)))
+
+
+def _valid_evidence(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict) and any(item.get(key) for key in ("event_id", "source", "session_id")):
+            evidence.append(dict(item))
+    return evidence
+
+
+def validate_agent_candidates(candidates: list[dict[str, Any]], *, project: str | None) -> list[dict[str, Any]]:
+    """Validate and normalize model-proposed memory candidates.
+
+    AI can decide memory semantics, but code owns safety, schema, evidence,
+    dedupe, score/status normalization, and project scoping.
+    """
+    valid: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str | None, str]] = set()
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        content = str(raw.get("content") or "").strip()
+        if not content or SENSITIVE_RE.search(content) or "```" in content or len(content) > 1200:
+            continue
+        memory_type = str(raw.get("type") or "").strip()
+        if memory_type not in ALLOWED_MEMORY_TYPES:
+            continue
+        scope = str(raw.get("scope") or "").strip()
+        if scope not in ALLOWED_SCOPES:
+            continue
+        decision = str(raw.get("decision") or "review").strip()
+        if decision not in ALLOWED_DECISIONS:
+            continue
+        evidence = _valid_evidence(raw.get("evidence"))
+        if not evidence:
+            continue
+        candidate_project = raw.get("project")
+        if scope == "project":
+            candidate_project = str(candidate_project or project or "") or None
+            if not candidate_project:
+                continue
+        elif scope in {"user", "global"}:
+            candidate_project = None
+        confidence = _coerce_confidence(raw.get("confidence", 0.5))
+        key = (scope, str(candidate_project), memory_type, _normalize_text(content))
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized = dict(raw)
+        normalized.update({
+            "id": str(raw.get("id") or _stable_candidate_id(_normalize_text(content), scope, str(candidate_project) if candidate_project else None)),
+            "content": content,
+            "type": memory_type,
+            "scope": scope,
+            "project": candidate_project,
+            "confidence": confidence,
+            "score": confidence,
+            "decision": decision,
+            "status": "promote" if decision == "promote" else "reject" if decision == "reject" else "review",
+            "evidence": evidence,
+            "tags": [str(tag) for tag in raw.get("tags", [])] if isinstance(raw.get("tags"), list) else [],
+        })
+        valid.append(normalized)
+    return valid
 
 
 def _message_text(agent_result: Any) -> str:
@@ -124,11 +217,12 @@ def agent_extract_memory_candidates(
         result = model.invoke(prompt)
         text = _message_text({"messages": [result]})
     payload = extract_json_payload(text)
+    candidates = validate_agent_candidates(list(payload.get("candidates", [])), project=project)
     return {
         "runtime": "deepagents-memory-agent",
         "dry_run": False,
         "model": str(model),
         "prompt": prompt,
         "raw_response": text,
-        "candidates": payload.get("candidates", []),
+        "candidates": candidates,
     }

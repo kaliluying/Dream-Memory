@@ -49,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     dream.add_argument("--project")
     dream.add_argument("--output-dir", default=".deepagent/memory")
     dream.add_argument("--apply", action="store_true", help="Append promoted preview to MEMORY.md")
-    dream.add_argument("--agent", action="store_true", help="Use DeepAgents memory extractor instead of rule-only extraction")
+    dream.add_argument("--mode", choices=["ai", "rules"], default="ai", help="Extraction mode: ai is default; rules is fallback/debug")
+    dream.add_argument("--agent", action="store_true", help="Deprecated alias for --mode ai")
     dream.add_argument("--model", default="anthropic:claude-sonnet-4-6")
     dream.add_argument("--invoke-model", action="store_true", help="Actually invoke the model; default writes prompt only")
 
@@ -75,11 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--limit", type=int, default=12)
     context.add_argument("--format", choices=["json", "markdown"], default="json")
 
-    pipeline = sub.add_parser("pipeline", help="Run extract-facts, dream, and review in one step")
+    pipeline = sub.add_parser("pipeline", help="Run dream and review in one step")
     pipeline.add_argument("--input", required=True)
     pipeline.add_argument("--project")
     pipeline.add_argument("--output-dir", default=".deepagent/memory")
     pipeline.add_argument("--memory-cards")
+    pipeline.add_argument("--mode", choices=["ai", "rules"], default="ai")
+    pipeline.add_argument("--model", default="anthropic:claude-sonnet-4-6")
+    pipeline.add_argument("--invoke-model", action="store_true")
 
     return parser
 
@@ -166,18 +170,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "pipeline":
         events = load_events_jsonl(Path(args.input))
         output_dir = Path(args.output_dir).expanduser()
-        result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=False)
+        if args.mode == "ai":
+            extraction = agent_extract_memory_candidates(events, project=args.project, model=args.model, invoke_model=bool(args.invoke_model))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "agent-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
+            if "raw_response" in extraction:
+                (output_dir / "agent-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
+            result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
+            payload = {**result.to_dict(), "mode": "ai", "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(output_dir / "agent-prompt.md")}
+        else:
+            result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=False)
+            payload = {**result.to_dict(), "mode": "rules"}
         candidates = load_events_jsonl(Path(result.candidates_path))
         memory_cards = _load_optional_jsonl(args.memory_cards)
         queue = build_review_queue(candidates, memory_cards)
         queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
-        print(json.dumps({**result.to_dict(), "review_queue_path": str(queue_path), "review_count": len(queue)}, ensure_ascii=False, indent=2))
+        print(json.dumps({**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "dream":
         events = load_events_jsonl(Path(args.input))
         output_dir = Path(args.output_dir)
-        if args.agent:
+        mode = "ai" if args.agent else args.mode
+        if mode == "ai":
             extraction = agent_extract_memory_candidates(events, project=args.project, model=args.model, invoke_model=bool(args.invoke_model))
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "agent-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
@@ -191,10 +206,10 @@ def main(argv: list[str] | None = None) -> int:
                 agent_candidates=list(extraction.get("candidates", [])),
                 agent_mode=True,
             )
-            payload = {**result.to_dict(), "agent": True, "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(output_dir / "agent-prompt.md")}
+            payload = {**result.to_dict(), "mode": "ai", "agent": True, "agent_dry_run": extraction["dry_run"], "agent_prompt_path": str(output_dir / "agent-prompt.md")}
         else:
             result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply))
-            payload = result.to_dict()
+            payload = {**result.to_dict(), "mode": "rules"}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
