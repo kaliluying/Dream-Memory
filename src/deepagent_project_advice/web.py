@@ -45,7 +45,7 @@ HOME_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DeepAgent Project Advice</title>
+  <title>DeepAgent Memory</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f7fb; color: #172033; }
     header { background: #172033; color: white; padding: 24px 32px; }
@@ -62,8 +62,8 @@ HOME_HTML = """
 </head>
 <body>
   <header>
-    <h1>DeepAgent Project Advice</h1>
-    <p>本地研发助手控制台：从需求到计划、Patch、验证报告。</p>
+    <h1>DeepAgent Memory</h1>
+    <p>本地 agent 记忆控制台：导入会话、审核候选记忆、生成任务上下文。</p>
   </header>
   <main>
     <section>
@@ -310,7 +310,7 @@ loadCandidates();
 def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_dir: Path | str = ".deepagent/memory") -> FastAPI:
     output_dir = Path(default_output_dir).expanduser()
     memory_dir = Path(default_memory_dir).expanduser()
-    app = FastAPI(title="DeepAgent Project Advice", version="0.1.0")
+    app = FastAPI(title="DeepAgent Memory", version="0.1.0")
 
     @app.get("/", response_class=HTMLResponse)
     def home() -> str:
