@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .memory_agent import agent_extract_memory_candidates
+from .memory_config import DEFAULT_CONFIG_PATH, load_memory_config, write_default_memory_config
 from .memory_dreaming import (
     apply_reviewed_memory,
     build_agent_context,
@@ -32,8 +33,12 @@ def _add_source_args(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deepagent-memory", description="Scan and import Claude Code / Codex sessions into shared memory events.")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Memory config JSON path")
     _add_source_args(parser)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    init_config = sub.add_parser("init-config", help="Write a default editable memory config file")
+    init_config.add_argument("--output", default=str(DEFAULT_CONFIG_PATH))
 
     scan = sub.add_parser("scan", help="Scan available Codex/Claude sources")
     _add_source_args(scan)
@@ -42,61 +47,72 @@ def build_parser() -> argparse.ArgumentParser:
     imp = sub.add_parser("import", help="Import normalized events")
     _add_source_args(imp)
     imp.add_argument("source", choices=["codex", "claude", "all"])
-    imp.add_argument("--output-dir", default=".deepagent/memory/imports")
+    imp.add_argument("--output-dir")
     imp.add_argument("--dry-run", action="store_true")
     dream = sub.add_parser("dream", help="Run memory dreaming over normalized events")
     dream.add_argument("--input", required=True, help="Input normalized events JSONL")
     dream.add_argument("--project")
-    dream.add_argument("--output-dir", default=".deepagent/memory")
+    dream.add_argument("--output-dir")
     dream.add_argument("--apply", action="store_true", help="Append promoted preview to MEMORY.md")
-    dream.add_argument("--mode", choices=["ai", "rules"], default="ai", help="Extraction mode: ai is default; rules is fallback/debug")
+    dream.add_argument("--mode", choices=["ai", "rules"], help="Extraction mode: ai is default; rules is fallback/debug")
     dream.add_argument("--agent", action="store_true", help="Deprecated alias for --mode ai")
-    dream.add_argument("--model", default="anthropic:claude-sonnet-4-6")
-    dream.set_defaults(invoke_model=True)
+    dream.add_argument("--provider")
+    dream.add_argument("--model")
+    dream.add_argument("--api-key-env")
+    dream.add_argument("--base-url")
+    dream.add_argument("--timeout-seconds", type=int)
+    dream.set_defaults(invoke_model=None)
     dream.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
     dream.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
 
     extract = sub.add_parser("extract-facts", help="Extract atomic facts from normalized events")
     extract.add_argument("--input", required=True)
     extract.add_argument("--project")
-    extract.add_argument("--output-dir", default=".deepagent/memory")
+    extract.add_argument("--output-dir")
 
     review = sub.add_parser("review", help="Build review queue items from candidates")
     review.add_argument("--candidates", required=True)
     review.add_argument("--memory-cards")
-    review.add_argument("--output-dir", default=".deepagent/memory")
+    review.add_argument("--output-dir")
 
     apply_cmd = sub.add_parser("apply", help="Apply reviewed memory decisions")
     apply_cmd.add_argument("--reviewed", required=True)
     apply_cmd.add_argument("--memory-cards")
-    apply_cmd.add_argument("--output-dir", default=".deepagent/memory")
+    apply_cmd.add_argument("--output-dir")
     apply_cmd.add_argument("--reviewer", required=True)
 
     context = sub.add_parser("context", help="Render task-scoped memory context for agents")
     context.add_argument("--project")
-    context.add_argument("--memory-cards", default=".deepagent/memory/memory_cards.jsonl")
-    context.add_argument("--limit", type=int, default=12)
-    context.add_argument("--format", choices=["json", "markdown"], default="json")
+    context.add_argument("--memory-cards")
+    context.add_argument("--limit", type=int)
+    context.add_argument("--format", choices=["json", "markdown"])
 
     pipeline = sub.add_parser("pipeline", help="Run dream and review in one step")
     pipeline.add_argument("--input", required=True)
     pipeline.add_argument("--project")
-    pipeline.add_argument("--output-dir", default=".deepagent/memory")
+    pipeline.add_argument("--output-dir")
     pipeline.add_argument("--memory-cards")
-    pipeline.add_argument("--mode", choices=["ai", "rules"], default="ai")
-    pipeline.add_argument("--model", default="anthropic:claude-sonnet-4-6")
-    pipeline.set_defaults(invoke_model=True)
+    pipeline.add_argument("--mode", choices=["ai", "rules"])
+    pipeline.add_argument("--provider")
+    pipeline.add_argument("--model")
+    pipeline.add_argument("--api-key-env")
+    pipeline.add_argument("--base-url")
+    pipeline.add_argument("--timeout-seconds", type=int)
+    pipeline.set_defaults(invoke_model=None)
     pipeline.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
     pipeline.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
 
     return parser
 
 
-def _build_importers(args: argparse.Namespace) -> tuple[CodexImporter, ClaudeCodeImporter]:
-    codex = CodexImporter(codex_home=Path(args.codex_home))
+def _build_importers(args: argparse.Namespace, config: dict[str, object]) -> tuple[CodexImporter, ClaudeCodeImporter]:
+    codex_home = args.codex_home or str(config["codex_home"])
+    claude_home = args.claude_home or str(config["claude_home"])
+    claude_state = args.claude_state or str(config["claude_state"])
+    codex = CodexImporter(codex_home=Path(codex_home).expanduser())
     claude = ClaudeCodeImporter(
-        claude_home=Path(args.claude_home),
-        global_state_path=Path(args.claude_state),
+        claude_home=Path(claude_home).expanduser(),
+        global_state_path=Path(claude_state).expanduser(),
         project_roots=_default_project_roots(args.project),
     )
     return codex, claude
@@ -118,9 +134,45 @@ def _write_report(output_dir: Path, payload: dict[str, object]) -> Path:
     return report_path
 
 
+def _value(value: object | None, fallback: object) -> object:
+    return fallback if value is None else value
+
+
+def _configured_output_dir(args: argparse.Namespace, config: dict[str, object]) -> Path:
+    return Path(str(_value(getattr(args, "output_dir", None), config["output_dir"]))).expanduser()
+
+
+def _configured_model(args: argparse.Namespace, config: dict[str, object]) -> str:
+    provider = _value(getattr(args, "provider", None), config.get("provider"))
+    model = str(_value(getattr(args, "model", None), config["model"]))
+    if provider and ":" not in model:
+        return f"{provider}:{model}"
+    return model
+
+
+def _apply_provider_env(args: argparse.Namespace, config: dict[str, object]) -> None:
+    import os
+    api_key_env = _value(getattr(args, "api_key_env", None), config.get("api_key_env"))
+    base_url = _value(getattr(args, "base_url", None), config.get("base_url"))
+    timeout = _value(getattr(args, "timeout_seconds", None), config.get("timeout_seconds"))
+    if api_key_env:
+        os.environ["DEEPAGENT_MEMORY_API_KEY_ENV"] = str(api_key_env)
+    if base_url:
+        os.environ["DEEPAGENT_MEMORY_BASE_URL"] = str(base_url)
+    if timeout:
+        os.environ["DEEPAGENT_MEMORY_TIMEOUT_SECONDS"] = str(timeout)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    codex, claude = _build_importers(args)
+    config = load_memory_config(args.config)
+
+    if args.command == "init-config":
+        path = write_default_memory_config(args.output)
+        print(json.dumps({"config_path": str(path)}, ensure_ascii=False, indent=2))
+        return 0
+
+    codex, claude = _build_importers(args, config)
     if args.command == "scan":
         payload = {"codex": codex.scan(), "claude": claude.scan()}
         text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -135,25 +187,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "extract-facts":
         events = load_events_jsonl(Path(args.input))
         facts = extract_atomic_facts(events, project=args.project)
-        output_dir = Path(args.output_dir).expanduser()
+        output_dir = _configured_output_dir(args, config)
         facts_path = write_jsonl_records(facts, output_dir / "facts.jsonl")
         print(json.dumps({"fact_count": len(facts), "facts_path": str(facts_path)}, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "review":
         candidates = load_events_jsonl(Path(args.candidates))
-        memory_cards = _load_optional_jsonl(args.memory_cards)
+        memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
         queue = build_review_queue(candidates, memory_cards)
-        output_dir = Path(args.output_dir).expanduser()
+        output_dir = _configured_output_dir(args, config)
         queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
         print(json.dumps({"review_count": len(queue), "review_queue_path": str(queue_path)}, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "apply":
         reviewed = load_events_jsonl(Path(args.reviewed))
-        existing_cards = _load_optional_jsonl(args.memory_cards)
+        existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
         cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
-        output_dir = Path(args.output_dir).expanduser()
+        output_dir = _configured_output_dir(args, config)
         output_dir.mkdir(parents=True, exist_ok=True)
         cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
         decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
@@ -163,9 +215,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "context":
-        cards = load_events_jsonl(Path(args.memory_cards))
-        payload = build_agent_context(cards, project=args.project, limit=int(args.limit))
-        if args.format == "markdown":
+        memory_cards_path = str(_value(args.memory_cards, config["memory_cards"]))
+        cards = load_events_jsonl(Path(memory_cards_path))
+        payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])))
+        context_format = str(_value(args.format, config["context_format"]))
+        if context_format == "markdown":
             print(render_context_markdown(payload), end="")
         else:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -173,9 +227,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pipeline":
         events = load_events_jsonl(Path(args.input))
-        output_dir = Path(args.output_dir).expanduser()
-        if args.mode == "ai":
-            extraction = agent_extract_memory_candidates(events, project=args.project, model=args.model, invoke_model=bool(args.invoke_model))
+        output_dir = _configured_output_dir(args, config)
+        mode = str(_value(args.mode, config["mode"]))
+        model = _configured_model(args, config)
+        invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
+        _apply_provider_env(args, config)
+        if mode == "ai":
+            extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "agent-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
             if "raw_response" in extraction:
@@ -186,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=False)
             payload = {**result.to_dict(), "mode": "rules"}
         candidates = load_events_jsonl(Path(result.candidates_path))
-        memory_cards = _load_optional_jsonl(args.memory_cards)
+        memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
         queue = build_review_queue(candidates, memory_cards)
         queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
         print(json.dumps({**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}, ensure_ascii=False, indent=2))
@@ -194,10 +252,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "dream":
         events = load_events_jsonl(Path(args.input))
-        output_dir = Path(args.output_dir)
-        mode = "ai" if args.agent else args.mode
+        output_dir = _configured_output_dir(args, config)
+        mode = "ai" if args.agent else str(_value(args.mode, config["mode"]))
+        model = _configured_model(args, config)
+        invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
+        _apply_provider_env(args, config)
         if mode == "ai":
-            extraction = agent_extract_memory_candidates(events, project=args.project, model=args.model, invoke_model=bool(args.invoke_model))
+            extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "agent-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
             if "raw_response" in extraction:
@@ -217,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    output_dir = Path(args.output_dir).expanduser()
+    output_dir = Path(str(_value(args.output_dir, config["imports_output_dir"]))).expanduser()
     events: list[NormalizedSessionEvent] = []
     written_files: list[str] = []
     if args.source in {"codex", "all"}:

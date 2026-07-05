@@ -269,16 +269,42 @@ class MemoryCliTests(unittest.TestCase):
             self.assertTrue((output_dir / "candidates.jsonl").exists())
             self.assertFalse((output_dir / "agent-candidates.jsonl").exists())
 
-    def test_ai_mode_invokes_model_by_default_and_dry_run_disables_it(self):
+    def test_ai_mode_uses_config_default_and_dry_run_disables_it(self):
         parser = build_parser()
 
         dream_args = parser.parse_args(["dream", "--input", "events.jsonl"])
         dry_run_args = parser.parse_args(["dream", "--input", "events.jsonl", "--dry-run"])
         pipeline_args = parser.parse_args(["pipeline", "--input", "events.jsonl"])
 
-        self.assertTrue(dream_args.invoke_model)
+        self.assertIsNone(dream_args.invoke_model)
         self.assertFalse(dry_run_args.invoke_model)
-        self.assertTrue(pipeline_args.invoke_model)
+        self.assertIsNone(pipeline_args.invoke_model)
+
+    def test_init_config_cli_writes_default_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+
+            exit_code = main(["init-config", "--output", str(config_path)])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["provider"], "anthropic")
+            self.assertEqual(payload["model"], "claude-sonnet-4-6")
+
+    def test_dream_uses_config_for_output_model_and_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            output_dir = root / "configured-memory"
+            config_path = root / "config.json"
+            events.write_text(json.dumps({"source": "codex", "role": "user", "content": "希望项目像 Claude Code", "project": str(root)}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"provider": "anthropic", "model": "test-model", "invoke_model": False, "output_dir": str(output_dir)}, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "dream", "--input", str(events), "--project", str(root)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_dir / "agent-prompt.md").exists())
+            self.assertTrue((output_dir / "agent-candidates.jsonl").exists())
 
 
 if __name__ == "__main__":

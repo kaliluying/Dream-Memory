@@ -4,6 +4,9 @@ DeepAgent Memory 是一个本地 Dream Memory / 梦境记忆系统，用来从 C
 
 ## 功能
 
+AI 抽取路径由 LangGraph 状态图编排：`build_prompt -> invoke_model -> validate_candidates`。
+
+
 - 导入 Claude Code / Codex 会话事件
 - 默认使用 AI 生成候选记忆
 - 保留规则模式作为 fallback/debug：`--mode rules`
@@ -19,6 +22,68 @@ DeepAgent Memory 是一个本地 Dream Memory / 梦境记忆系统，用来从 C
 ```bash
 uv sync
 uv run deepagent-memory --help
+```
+
+
+## 轻量 Provider 配置
+
+项目使用 LangGraph 编排 AI 候选记忆抽取流程，并通过轻量 provider 层调用模型。当前 provider 支持：
+
+- `anthropic`
+- `openai`
+- `openrouter`
+
+## 配置文件
+
+默认配置路径是 `.deepagent/memory/config.json`。先生成可编辑配置：
+
+```bash
+uv run deepagent-memory init-config
+```
+
+也可以指定位置：
+
+```bash
+uv run deepagent-memory --config ./memory-config.json init-config --output ./memory-config.json
+```
+
+配置示例：
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "base_url": null,
+  "timeout_seconds": 60,
+  "invoke_model": true,
+  "mode": "ai",
+  "output_dir": ".deepagent/memory",
+  "imports_output_dir": ".deepagent/memory/imports",
+  "memory_cards": ".deepagent/memory/memory_cards.jsonl",
+  "context_limit": 12,
+  "context_format": "json",
+  "codex_home": "~/.codex",
+  "claude_home": "~/.claude",
+  "claude_state": "~/.claude.json"
+}
+```
+
+命令行参数优先级高于配置文件。例如临时切模型：
+
+```bash
+uv run deepagent-memory --config .deepagent/memory/config.json pipeline \
+  --input .deepagent/memory/imports/all-events.jsonl \
+  --provider openai \
+  --model gpt-4.1
+```
+
+API Key 仍通过环境变量配置，例如：
+
+```bash
+export ANTHROPIC_API_KEY="你的 key"
+# 或
+export OPENAI_API_KEY="你的 key"
 ```
 
 ## 常用流程

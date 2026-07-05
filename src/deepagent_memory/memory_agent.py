@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
+
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<json>\{.*?\})\s*```", re.DOTALL)
 SENSITIVE_RE = re.compile(
     r"(sk-[a-zA-Z0-9]|api[_-]?key\s*[=:]|access[_-]?token\s*[=:]|refresh[_-]?token\s*[=:]|password\s*[=:]|secret\s*[=:]|cookie\s*[=:]|bearer\s+[a-zA-Z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)",
@@ -196,30 +197,41 @@ def agent_extract_memory_candidates(
     model: Any = "anthropic:claude-sonnet-4-6",
     invoke_model: bool = False,
 ) -> dict[str, Any]:
+    if isinstance(model, str):
+        from .memory_graph import run_memory_extraction_graph
+
+        result = run_memory_extraction_graph(
+            events,
+            project=project,
+            model=model,
+            invoke_model=invoke_model,
+        )
+        payload = {
+            "runtime": "langgraph-memory-extraction",
+            "dry_run": bool(result.get("dry_run", False)),
+            "model": str(model),
+            "prompt": str(result.get("prompt") or ""),
+            "candidates": list(result.get("candidates", [])),
+        }
+        if "raw_response" in result:
+            payload["raw_response"] = str(result["raw_response"])
+        return payload
+
     prompt = build_memory_extraction_prompt(events, project=project)
     if not invoke_model:
         return {
-            "runtime": "deepagents-memory-agent",
+            "runtime": "langgraph-memory-extraction",
             "dry_run": True,
             "model": str(model),
             "prompt": prompt,
             "candidates": [],
         }
-    if isinstance(model, str):
-        try:
-            from deepagents import create_deep_agent
-        except ImportError as exc:
-            raise RuntimeError("deepagents is required for --invoke-model with a string model") from exc
-        agent = create_deep_agent(model=model, tools=[], prompt=prompt)
-        result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
-        text = _message_text(result)
-    else:
-        result = model.invoke(prompt)
-        text = _message_text({"messages": [result]})
+    result = model.invoke(prompt)
+    text = _message_text({"messages": [result]})
     payload = extract_json_payload(text)
     candidates = validate_agent_candidates(list(payload.get("candidates", [])), project=project)
     return {
-        "runtime": "deepagents-memory-agent",
+        "runtime": "langgraph-memory-extraction",
         "dry_run": False,
         "model": str(model),
         "prompt": prompt,
