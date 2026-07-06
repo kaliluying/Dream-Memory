@@ -103,15 +103,19 @@ class CodexImporter:
         thread_count = 0
         rollout_count = 0
         if self.state_db_path.exists():
+            con = None
             try:
-                with sqlite3.connect(self.state_db_path) as con:
-                    thread_count = con.execute("select count(*) from threads").fetchone()[0]
-                    try:
-                        rollout_count = con.execute("select count(*) from threads where rollout_path is not null and rollout_path != ''").fetchone()[0]
-                    except sqlite3.Error:
-                        rollout_count = 0
+                con = sqlite3.connect(self.state_db_path)
+                thread_count = con.execute("select count(*) from threads").fetchone()[0]
+                try:
+                    rollout_count = con.execute("select count(*) from threads where rollout_path is not null and rollout_path != ''").fetchone()[0]
+                except sqlite3.Error:
+                    rollout_count = 0
             except sqlite3.Error:
                 pass
+            finally:
+                if con is not None:
+                    con.close()
         memories_dir = self.codex_home / "memories"
         return {
             "source": "codex",
@@ -128,14 +132,17 @@ class CodexImporter:
     def _thread_rows(self) -> list[dict[str, Any]]:
         if not self.state_db_path.exists():
             return []
+        con = None
         try:
             con = sqlite3.connect(self.state_db_path)
             con.row_factory = sqlite3.Row
             rows = con.execute("select id, rollout_path, cwd, title, first_user_message, updated_at, model from threads").fetchall()
-            con.close()
             return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
+        finally:
+            if con is not None:
+                con.close()
 
     def import_events(self) -> list[NormalizedSessionEvent]:
         events: list[NormalizedSessionEvent] = []

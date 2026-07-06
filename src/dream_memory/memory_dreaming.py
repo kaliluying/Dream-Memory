@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from .memory_models import build_atomic_fact, build_memory_card, build_review_decision, build_review_queue_item
@@ -67,7 +67,12 @@ def write_jsonl_records(records: list[dict[str, Any]], path: Path | str) -> Path
 def normalize_project_path(project: str | None) -> str | None:
     if not project:
         return None
-    return str(Path(project).expanduser().absolute())
+    raw = str(project).strip()
+    if not raw:
+        return None
+    if raw.startswith("/") and not raw.startswith("//"):
+        return PurePosixPath(raw).as_posix()
+    return str(Path(raw).expanduser().absolute())
 
 
 def normalize_memory_text(value: str) -> str:
