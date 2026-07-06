@@ -21,7 +21,7 @@ from .memory_dreaming import (
     write_jsonl_records,
 )
 from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, write_events_jsonl
-from .model_providers import provider_diagnostics
+from .model_providers import provider_diagnostics, runtime_parts_from_config
 from .memory_runs import (
     append_trace,
     copy_input_events,
@@ -105,6 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     check_provider.add_argument("--base-url")
     check_provider.add_argument("--timeout-seconds", type=int)
     check_provider.add_argument("--invoke", action="store_true")
+    check_provider.add_argument("--all", action="store_true", help="Check all configured model profiles")
+    check_provider.add_argument("--profile", help="Check one configured model profile")
 
     scan = sub.add_parser("scan", help="Scan available Codex/Claude sources")
     _add_source_args(scan)
@@ -266,6 +268,52 @@ def _configured_model(args: argparse.Namespace, config: dict[str, object]) -> st
     return model
 
 
+def _runtime_config_from_args(args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
+    runtime_config = {
+        "models": config.get("models"),
+        "model_policy": config.get("model_policy"),
+    }
+    provider_override = getattr(args, "provider", None)
+    model_override = getattr(args, "model", None)
+    api_key_override = getattr(args, "api_key_env", None)
+    base_url_override = getattr(args, "base_url", None)
+    timeout_override = getattr(args, "timeout_seconds", None)
+    if any(value is not None for value in (provider_override, model_override, api_key_override, base_url_override, timeout_override)):
+        provider = str(_value(provider_override, config.get("provider")))
+        model = str(_value(model_override, config["model"]))
+        if ":" in model and provider == str(config.get("provider")):
+            parsed_provider, parsed_model = model.split(":", 1)
+            provider, model = parsed_provider, parsed_model
+        runtime_config = {
+            "models": {
+                "override": {
+                    "provider": provider,
+                    "model": model,
+                    "api_key_env": _value(api_key_override, config.get("api_key_env")),
+                    "base_url": _value(base_url_override, config.get("base_url")),
+                    "timeout_seconds": int(_value(timeout_override, config.get("timeout_seconds", 60))),
+                }
+            },
+            "model_policy": {
+                "default_profile": "override",
+                "fallback_chain": ["override"],
+                "retry": dict(config.get("model_policy", {}).get("retry", {})) if isinstance(config.get("model_policy"), dict) else {},
+                "allow_rules_fallback": bool(config.get("model_policy", {}).get("allow_rules_fallback", False)) if isinstance(config.get("model_policy"), dict) else False,
+            },
+        }
+    return runtime_config
+
+
+def _model_trace_callback(state: dict[str, object] | None):
+    if not state:
+        return None
+
+    def callback(event_type: str, payload: dict[str, object]) -> None:
+        append_trace(state, event_type, payload)
+
+    return callback
+
+
 def _apply_provider_env(args: argparse.Namespace, config: dict[str, object]) -> None:
     import os
     api_key_env = _value(getattr(args, "api_key_env", None), config.get("api_key_env"))
@@ -291,6 +339,7 @@ def _run_dream_to_review(
     mode = str(_value(args.mode, config["mode"]))
     model = _configured_model(args, config)
     invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
+    runtime_config = _runtime_config_from_args(args, config)
     _apply_provider_env(args, config)
     state: dict[str, object] | None = None
     if persistent:
@@ -302,7 +351,14 @@ def _run_dream_to_review(
     else:
         working_dir = output_dir
     if mode == "ai":
-        extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
+        extraction = agent_extract_memory_candidates(
+            events,
+            project=args.project,
+            model=model,
+            invoke_model=invoke_model,
+            runtime_config=runtime_config,
+            trace_callback=_model_trace_callback(state),
+        )
         working_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = working_dir / "ai-prompt.md"
         prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
@@ -316,6 +372,8 @@ def _run_dream_to_review(
             append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
         result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
         payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path)}
+        if "model_runtime" in extraction:
+            payload["model_runtime"] = extraction["model_runtime"]
     else:
         result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False)
         payload = {**result.to_dict(), "mode": "rules"}
@@ -432,6 +490,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "check-provider":
+        if args.all or args.profile:
+            profiles, _ = runtime_parts_from_config(config)
+            selected = [args.profile] if args.profile else list(profiles)
+            diagnostics: dict[str, object] = {}
+            ok = True
+            for profile_name in selected:
+                profile = profiles.get(profile_name)
+                if profile is None:
+                    diagnostics[profile_name] = {"ok": False, "error": f"unknown profile: {profile_name}"}
+                    ok = False
+                    continue
+                item = provider_diagnostics(
+                    provider=profile.config.provider,
+                    model=profile.config.model,
+                    api_key_env=profile.config.api_key_env,
+                    base_url=profile.config.base_url,
+                    timeout_seconds=profile.config.timeout_seconds,
+                    invoke=bool(args.invoke),
+                )
+                diagnostics[profile_name] = item
+                ok = ok and bool(item.get("ok"))
+            print(json.dumps({"profiles": diagnostics, "ok": ok}, ensure_ascii=False, indent=2))
+            return 0 if ok else 1
         provider = str(_value(args.provider, config.get("provider")))
         model = str(_value(args.model, config["model"]))
         api_key_env = str(_value(args.api_key_env, config.get("api_key_env")))
@@ -563,9 +644,10 @@ def main(argv: list[str] | None = None) -> int:
         mode = "ai" if args.agent else str(_value(args.mode, config["mode"]))
         model = _configured_model(args, config)
         invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
+        runtime_config = _runtime_config_from_args(args, config)
         _apply_provider_env(args, config)
         if mode == "ai":
-            extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model)
+            extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model, runtime_config=runtime_config)
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "ai-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
             if "raw_response" in extraction:
@@ -579,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
                 agent_mode=True,
             )
             payload = {**result.to_dict(), "mode": "ai", "ai": True, "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(output_dir / "ai-prompt.md")}
+            if "model_runtime" in extraction:
+                payload["model_runtime"] = extraction["model_runtime"]
         else:
             result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply))
             payload = {**result.to_dict(), "mode": "rules"}

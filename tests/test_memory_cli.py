@@ -3,8 +3,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dream_memory.memory_cli import build_parser, main
+from dream_memory.model_providers import ModelRuntimeResult
 
 
 class MemoryCliTests(unittest.TestCase):
@@ -401,6 +403,95 @@ class MemoryCliTests(unittest.TestCase):
             exit_code = main(["--config", str(config_path), "check-provider"])
 
             self.assertEqual(exit_code, 1)
+
+    def test_check_provider_all_reports_each_configured_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({
+                "models": {
+                    "primary": {"provider": "anthropic", "model": "claude-sonnet-4-6", "api_key_env": "ANTHROPIC_API_KEY"},
+                    "backup": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"},
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary", "backup"]},
+            }), encoding="utf-8")
+
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "b"}):
+                exit_code = main(["--config", str(config_path), "check-provider", "--all"])
+
+            self.assertEqual(exit_code, 0)
+
+    def test_dream_dry_run_does_not_call_model_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            output_dir = root / "memory"
+            config_path = root / "config.json"
+            events.write_text(json.dumps({"source": "codex", "role": "user", "content": "希望项目像 Claude Code", "project": str(root)}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "output_dir": str(output_dir),
+                "models": {
+                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"}
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+            }, ensure_ascii=False), encoding="utf-8")
+
+            with patch("dream_memory.memory_graph.invoke_model_runtime") as invoke:
+                exit_code = main(["--config", str(config_path), "dream", "--input", str(events), "--project", str(root), "--dry-run"])
+
+            self.assertEqual(exit_code, 0)
+            invoke.assert_not_called()
+            self.assertTrue((output_dir / "ai-prompt.md").exists())
+
+    def test_run_cli_records_model_runtime_trace_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events_path.write_text(json.dumps({
+                "event_id": "event_1",
+                "source": "codex",
+                "session_id": "s1",
+                "role": "user",
+                "event_type": "history_prompt",
+                "project": str(root),
+                "content": "用户偏好中文回答",
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "output_dir": str(memory_dir),
+                "models": {
+                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"}
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"], "retry": {"max_attempts": 1}},
+            }, ensure_ascii=False), encoding="utf-8")
+            raw = json.dumps({
+                "candidates": [{
+                    "content": "用户偏好中文回答。",
+                    "type": "preference",
+                    "scope": "user",
+                    "confidence": 0.95,
+                    "decision": "promote",
+                    "reason": "explicit",
+                    "evidence": [{"event_id": "event_1", "source": "codex"}],
+                    "tags": ["language"],
+                }]
+            }, ensure_ascii=False)
+
+            with patch("dream_memory.memory_graph.invoke_model_runtime") as invoke:
+                def fake_runtime(prompt, *, runtime_config, trace_callback=None):
+                    if trace_callback:
+                        trace_callback("model_attempt_started", {"profile": "primary", "provider": "openai", "model": "gpt-4.1", "attempt": 1})
+                        trace_callback("model_attempt_succeeded", {"profile": "primary", "provider": "openai", "model": "gpt-4.1", "attempt": 1, "elapsed_ms": 1})
+                    return ModelRuntimeResult(text=raw, selected_profile="primary", attempts=[], elapsed_ms=1)
+
+                invoke.side_effect = fake_runtime
+                exit_code = main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(root), "--invoke-model"])
+
+            self.assertEqual(exit_code, 0)
+            state = json.loads(next((memory_dir / "runs").glob("*/state.json")).read_text(encoding="utf-8"))
+            trace_text = (Path(state["run_dir"]) / "trace.jsonl").read_text(encoding="utf-8")
+            self.assertIn("model_attempt_started", trace_text)
+            self.assertIn("model_attempt_succeeded", trace_text)
 
     def test_resume_auto_exports_when_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
