@@ -28,11 +28,13 @@ uv run dream-memory --help
 
 ## 轻量 Provider 配置
 
-项目使用 LangGraph 编排 AI 候选记忆抽取流程，并通过轻量 provider 层调用模型。当前 provider 支持：
+项目使用 LangGraph 编排 AI 候选记忆抽取流程，并通过轻量 provider/runtime 层调用模型。当前 provider 支持：
 
 - `anthropic`
 - `openai`
 - `openrouter`
+
+模型层支持命名 profiles、重试和 fallback chain。旧版单模型字段仍然兼容；如果没有配置 `models`，系统会自动把 `provider/model/api_key_env/base_url/timeout_seconds` 归一化成 `default` profile。
 
 ## 配置文件
 
@@ -70,7 +72,36 @@ uv run dream-memory --config ./memory-config.json init-config --output ./memory-
   "export_output_dir": null,
   "codex_home": "~/.codex",
   "claude_home": "~/.claude",
-  "claude_state": "~/.claude.json"
+  "claude_state": "~/.claude.json",
+  "models": {
+    "primary": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "base_url": null,
+      "timeout_seconds": 60
+    },
+    "openai_backup": {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": null,
+      "timeout_seconds": 45
+    }
+  },
+  "model_policy": {
+    "default_profile": "primary",
+    "fallback_chain": ["primary", "openai_backup"],
+    "retry": {
+      "max_attempts": 3,
+      "initial_delay_seconds": 1.0,
+      "backoff_factor": 2.0,
+      "max_delay_seconds": 8.0,
+      "retry_on_status": [429, 500, 502, 503, 504],
+      "retry_on_timeout": true
+    },
+    "allow_rules_fallback": false
+  }
 }
 ```
 
@@ -87,7 +118,11 @@ uv run dream-memory --config .dream-memory/config.json pipeline \
 
 ```bash
 uv run dream-memory check-provider
+uv run dream-memory check-provider --all
+uv run dream-memory check-provider --profile primary
 ```
+
+`check-provider --all` 会检查所有 configured profiles。`dream` / `pipeline` / `run` 会按 `model_policy.fallback_chain` 尝试模型；单个 profile 内会按 retry policy 对 `429/500/502/503/504` 和超时做有界指数退避重试。持久化 run 会把模型尝试、失败、成功和 fallback 事件写入 `trace.jsonl`。
 
 API Key 仍通过环境变量配置，例如：
 
