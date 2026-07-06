@@ -13,6 +13,7 @@ from dream_memory.model_providers import (
     RetryPolicy,
     StaticModelProvider,
     parse_model_ref,
+    runtime_parts_from_config,
 )
 
 
@@ -34,6 +35,44 @@ class ModelProviderTests(unittest.TestCase):
         provider = StaticModelProvider(json.dumps({"candidates": []}))
 
         self.assertEqual(provider.invoke("prompt"), '{"candidates": []}')
+
+    def test_runtime_parts_requires_named_model_profiles(self):
+        with self.assertRaisesRegex(ValueError, "requires non-empty models"):
+            runtime_parts_from_config({"provider": "openai", "model": "gpt-4.1"})
+
+    def test_runtime_parts_requires_model_policy(self):
+        with self.assertRaisesRegex(ValueError, "requires model_policy"):
+            runtime_parts_from_config({"models": {"primary": {"provider": "openai", "model": "gpt-4.1"}}})
+
+    def test_runtime_parts_rejects_unknown_fallback_profile(self):
+        with self.assertRaisesRegex(ValueError, "unknown profiles: backup"):
+            runtime_parts_from_config(
+                {
+                    "models": {"primary": {"provider": "openai", "model": "gpt-4.1"}},
+                    "model_policy": {"default_profile": "primary", "fallback_chain": ["primary", "backup"]},
+                }
+            )
+
+    def test_runtime_parts_builds_profiles_and_policy(self):
+        profiles, policy = runtime_parts_from_config(
+            {
+                "models": {
+                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"},
+                    "backup": {"provider": "anthropic", "model": "claude-sonnet-4-6", "api_key_env": "ANTHROPIC_API_KEY"},
+                },
+                "model_policy": {
+                    "default_profile": "primary",
+                    "fallback_chain": ["primary", "backup"],
+                    "retry": {"max_attempts": 2},
+                },
+            }
+        )
+
+        self.assertEqual(profiles["primary"].config.provider, "openai")
+        self.assertEqual(profiles["backup"].config.model, "claude-sonnet-4-6")
+        self.assertEqual(policy.default_profile, "primary")
+        self.assertEqual(policy.fallback_chain, ["primary", "backup"])
+        self.assertEqual(policy.retry.max_attempts, 2)
 
     def test_model_runtime_retries_retryable_http_error_then_succeeds(self):
         attempts = []

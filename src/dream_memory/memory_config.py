@@ -17,11 +17,6 @@ DEFAULT_RETRY_POLICY: dict[str, Any] = {
 }
 
 DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-6",
-    "api_key_env": "ANTHROPIC_API_KEY",
-    "base_url": None,
-    "timeout_seconds": 60,
     "invoke_model": True,
     "mode": "ai",
     "output_dir": ".dream-memory",
@@ -36,73 +31,72 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "codex_home": "~/.codex",
     "claude_home": "~/.claude",
     "claude_state": "~/.claude.json",
-    "models": {},
+    "models": {
+        "primary": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "base_url": None,
+            "timeout_seconds": 60,
+        }
+    },
     "model_policy": {
-        "default_profile": "default",
-        "fallback_chain": ["default"],
+        "default_profile": "primary",
+        "fallback_chain": ["primary"],
         "retry": DEFAULT_RETRY_POLICY,
         "allow_rules_fallback": False,
     },
 }
 
 
-def _flat_model_profile(config: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "provider": config["provider"],
-        "model": config["model"],
-        "api_key_env": config.get("api_key_env"),
-        "base_url": config.get("base_url"),
-        "timeout_seconds": config.get("timeout_seconds", 60),
-    }
-
-
 def normalize_memory_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(config)
-    flat_profile = _flat_model_profile(normalized)
     loaded_models = normalized.get("models")
-    if isinstance(loaded_models, dict) and loaded_models:
-        models: dict[str, dict[str, Any]] = {}
-        for name, value in loaded_models.items():
-            if not isinstance(value, dict):
-                continue
-            profile = dict(flat_profile)
-            for key in ("provider", "model", "api_key_env", "base_url", "timeout_seconds"):
-                if key in value:
-                    profile[key] = value[key]
-            models[str(name)] = profile
-        if not models:
-            models = {"default": flat_profile}
-    else:
-        models = {"default": flat_profile}
+    if not isinstance(loaded_models, dict) or not loaded_models:
+        raise ValueError("Memory config requires non-empty models")
+    models: dict[str, dict[str, Any]] = {}
+    for name, value in loaded_models.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Model profile must be an object: {name}")
+        profile = {
+            "provider": value.get("provider"),
+            "model": value.get("model"),
+            "api_key_env": value.get("api_key_env"),
+            "base_url": value.get("base_url"),
+            "timeout_seconds": value.get("timeout_seconds", 60),
+        }
+        if not profile["provider"] or not profile["model"]:
+            raise ValueError(f"Model profile requires provider and model: {name}")
+        models[str(name)] = profile
     normalized["models"] = models
 
     loaded_policy = normalized.get("model_policy")
-    default_profile = "default" if "default" in models else next(iter(models))
+    if not isinstance(loaded_policy, dict):
+        raise ValueError("Memory config requires model_policy")
+    default_profile = str(loaded_policy.get("default_profile") or "")
+    if default_profile not in models:
+        raise ValueError(f"model_policy.default_profile is not configured in models: {default_profile}")
+    fallback_chain = loaded_policy.get("fallback_chain")
+    if not isinstance(fallback_chain, list) or not fallback_chain:
+        raise ValueError("model_policy.fallback_chain must include at least one profile")
+    unknown_profiles = [str(name) for name in fallback_chain if str(name) not in models]
+    if unknown_profiles:
+        raise ValueError(f"model_policy.fallback_chain contains unknown profiles: {', '.join(unknown_profiles)}")
     policy: dict[str, Any] = {
         "default_profile": default_profile,
-        "fallback_chain": [default_profile],
+        "fallback_chain": [str(name) for name in fallback_chain],
         "retry": deepcopy(DEFAULT_RETRY_POLICY),
         "allow_rules_fallback": False,
     }
-    if isinstance(loaded_policy, dict):
-        if loaded_policy.get("default_profile") in models:
-            policy["default_profile"] = loaded_policy["default_profile"]
-        fallback_chain = loaded_policy.get("fallback_chain")
-        if isinstance(fallback_chain, list):
-            valid_chain = [str(name) for name in fallback_chain if str(name) in models]
-            if valid_chain:
-                policy["fallback_chain"] = valid_chain
-        elif policy["default_profile"] in models:
-            policy["fallback_chain"] = [policy["default_profile"]]
-        retry = loaded_policy.get("retry")
-        if isinstance(retry, dict):
-            merged_retry = deepcopy(DEFAULT_RETRY_POLICY)
-            for key, value in retry.items():
-                if key in merged_retry:
-                    merged_retry[key] = value
-            policy["retry"] = merged_retry
-        if "allow_rules_fallback" in loaded_policy:
-            policy["allow_rules_fallback"] = bool(loaded_policy["allow_rules_fallback"])
+    retry = loaded_policy.get("retry")
+    if isinstance(retry, dict):
+        merged_retry = deepcopy(DEFAULT_RETRY_POLICY)
+        for key, value in retry.items():
+            if key in merged_retry:
+                merged_retry[key] = value
+        policy["retry"] = merged_retry
+    if "allow_rules_fallback" in loaded_policy:
+        policy["allow_rules_fallback"] = bool(loaded_policy["allow_rules_fallback"])
     if policy["default_profile"] not in policy["fallback_chain"]:
         policy["fallback_chain"] = [policy["default_profile"], *policy["fallback_chain"]]
     normalized["model_policy"] = policy
@@ -120,6 +114,8 @@ def load_memory_config(path: Path | str | None = None) -> dict[str, Any]:
         raise ValueError(f"Invalid memory config JSON: {config_path}") from exc
     if not isinstance(loaded, dict):
         raise ValueError(f"Memory config must be a JSON object: {config_path}")
+    if any(key in loaded for key in ("provider", "model", "api_key_env", "base_url", "timeout_seconds")) and "models" not in loaded:
+        raise ValueError("Memory config no longer supports flat model fields; configure models and model_policy")
     for key, value in loaded.items():
         if key in config:
             config[key] = value

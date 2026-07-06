@@ -14,6 +14,7 @@ from .memory_cli import _resume_run, _run_dream_to_review
 from .memory_config import DEFAULT_MEMORY_CONFIG
 from .memory_dreaming import normalize_review_decision
 from .memory_runs import append_trace, create_run_state, list_runs, load_run_state, read_trace, update_run_state
+from .model_providers import runtime_parts_from_config
 
 
 class MemoryReviewRequest(BaseModel):
@@ -255,6 +256,14 @@ def _web_config(memory_dir: Path) -> dict[str, Any]:
     return config
 
 
+def _model_label_from_request(request: MemoryRunStartRequest, config: dict[str, Any]) -> str:
+    if request.model:
+        return f"{request.provider}:{request.model}" if request.provider and ":" not in request.model else request.model
+    profiles, policy = runtime_parts_from_config(config)
+    profile = profiles[policy.default_profile]
+    return f"{profile.config.provider}:{profile.config.model}"
+
+
 def _run_namespace(request: MemoryRunStartRequest, memory_dir: Path) -> Namespace:
     return Namespace(
         input=request.input,
@@ -329,9 +338,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         config = _web_config(memory_dir)
         args = _run_namespace(request, memory_dir)
         mode = str(request.mode or config["mode"])
-        provider = request.provider or config.get("provider")
-        configured_model = str(request.model or config["model"])
-        model = f"{provider}:{configured_model}" if provider and ":" not in configured_model else configured_model
+        model = _model_label_from_request(request, config)
         invoke_model = bool(config["invoke_model"] if request.invoke_model is None else request.invoke_model)
         state = create_run_state(
             memory_dir=memory_dir,

@@ -360,24 +360,13 @@ def _retry_policy_from_config(value: dict[str, Any] | None) -> RetryPolicy:
 def runtime_parts_from_config(config: dict[str, Any]) -> tuple[dict[str, ModelProfile], ModelPolicy]:
     raw_models = config.get("models")
     if not isinstance(raw_models, dict) or not raw_models:
-        provider_config = parse_model_ref(
-            str(config["model"]),
-            provider=str(config.get("provider") or "anthropic"),
-            api_key_env=str(config["api_key_env"]) if config.get("api_key_env") else None,
-            base_url=str(config["base_url"]) if config.get("base_url") else None,
-            timeout_seconds=int(config.get("timeout_seconds", 60)),
-        )
-        raw_models = {"default": {
-            "provider": provider_config.provider,
-            "model": provider_config.model,
-            "api_key_env": provider_config.api_key_env,
-            "base_url": provider_config.base_url,
-            "timeout_seconds": provider_config.timeout_seconds,
-        }}
+        raise ValueError("Memory config requires non-empty models")
     profiles: dict[str, ModelProfile] = {}
     for name, value in raw_models.items():
         if not isinstance(value, dict):
-            continue
+            raise ValueError(f"Model profile {name} must be a mapping")
+        if not value.get("model"):
+            raise ValueError(f"Model profile {name} requires model")
         profiles[str(name)] = ModelProfile(
             str(name),
             ProviderConfig(
@@ -390,14 +379,24 @@ def runtime_parts_from_config(config: dict[str, Any]) -> tuple[dict[str, ModelPr
         )
     if not profiles:
         raise ValueError("No model profiles configured")
-    raw_policy = config.get("model_policy") if isinstance(config.get("model_policy"), dict) else {}
-    default_profile = str(raw_policy.get("default_profile") or next(iter(profiles)))
+    raw_policy = config.get("model_policy")
+    if not isinstance(raw_policy, dict):
+        raise ValueError("Memory config requires model_policy")
+    default_profile = str(raw_policy.get("default_profile") or "")
+    if not default_profile:
+        raise ValueError("model_policy.default_profile is required")
+    if default_profile not in profiles:
+        raise ValueError(f"model_policy.default_profile references unknown profile: {default_profile}")
     fallback_chain = raw_policy.get("fallback_chain")
     if not isinstance(fallback_chain, list) or not fallback_chain:
-        fallback_chain = [default_profile]
+        raise ValueError("model_policy.fallback_chain must be a non-empty list")
+    normalized_chain = [str(name) for name in fallback_chain]
+    unknown_profiles = [name for name in normalized_chain if name not in profiles]
+    if unknown_profiles:
+        raise ValueError(f"model_policy.fallback_chain references unknown profiles: {', '.join(unknown_profiles)}")
     policy = ModelPolicy(
         default_profile=default_profile,
-        fallback_chain=[str(name) for name in fallback_chain],
+        fallback_chain=normalized_chain,
         retry=_retry_policy_from_config(raw_policy.get("retry") if isinstance(raw_policy.get("retry"), dict) else None),
         allow_rules_fallback=bool(raw_policy.get("allow_rules_fallback", False)),
     )

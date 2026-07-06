@@ -261,8 +261,10 @@ def _configured_output_dir(args: argparse.Namespace, config: dict[str, object]) 
 
 
 def _configured_model(args: argparse.Namespace, config: dict[str, object]) -> str:
-    provider = _value(getattr(args, "provider", None), config.get("provider"))
-    model = str(_value(getattr(args, "model", None), config["model"]))
+    profiles, policy = runtime_parts_from_config(config)
+    default_profile = profiles[policy.default_profile].config
+    provider = str(_value(getattr(args, "provider", None), default_profile.provider))
+    model = str(_value(getattr(args, "model", None), default_profile.model))
     if provider and ":" not in model:
         return f"{provider}:{model}"
     return model
@@ -279,9 +281,11 @@ def _runtime_config_from_args(args: argparse.Namespace, config: dict[str, object
     base_url_override = getattr(args, "base_url", None)
     timeout_override = getattr(args, "timeout_seconds", None)
     if any(value is not None for value in (provider_override, model_override, api_key_override, base_url_override, timeout_override)):
-        provider = str(_value(provider_override, config.get("provider")))
-        model = str(_value(model_override, config["model"]))
-        if ":" in model and provider == str(config.get("provider")):
+        profiles, policy = runtime_parts_from_config(config)
+        default_profile = profiles[policy.default_profile].config
+        provider = str(_value(provider_override, default_profile.provider))
+        model = str(_value(model_override, default_profile.model))
+        if ":" in model and provider == default_profile.provider:
             parsed_provider, parsed_model = model.split(":", 1)
             provider, model = parsed_provider, parsed_model
         runtime_config = {
@@ -289,9 +293,9 @@ def _runtime_config_from_args(args: argparse.Namespace, config: dict[str, object
                 "override": {
                     "provider": provider,
                     "model": model,
-                    "api_key_env": _value(api_key_override, config.get("api_key_env")),
-                    "base_url": _value(base_url_override, config.get("base_url")),
-                    "timeout_seconds": int(_value(timeout_override, config.get("timeout_seconds", 60))),
+                    "api_key_env": _value(api_key_override, default_profile.api_key_env),
+                    "base_url": _value(base_url_override, default_profile.base_url),
+                    "timeout_seconds": int(_value(timeout_override, default_profile.timeout_seconds)),
                 }
             },
             "model_policy": {
@@ -513,11 +517,13 @@ def main(argv: list[str] | None = None) -> int:
                 ok = ok and bool(item.get("ok"))
             print(json.dumps({"profiles": diagnostics, "ok": ok}, ensure_ascii=False, indent=2))
             return 0 if ok else 1
-        provider = str(_value(args.provider, config.get("provider")))
-        model = str(_value(args.model, config["model"]))
-        api_key_env = str(_value(args.api_key_env, config.get("api_key_env")))
-        base_url = _value(args.base_url, config.get("base_url"))
-        timeout_seconds = int(_value(args.timeout_seconds, config.get("timeout_seconds", 60)))
+        profiles, policy = runtime_parts_from_config(_runtime_config_from_args(args, config))
+        profile = profiles[policy.default_profile].config
+        provider = profile.provider
+        model = profile.model
+        api_key_env = profile.api_key_env
+        base_url = profile.base_url
+        timeout_seconds = profile.timeout_seconds
         payload = provider_diagnostics(provider=provider, model=model, api_key_env=api_key_env, base_url=str(base_url) if base_url else None, timeout_seconds=timeout_seconds, invoke=bool(args.invoke))
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if payload.get("ok") else 1

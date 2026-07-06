@@ -11,21 +11,7 @@ uv run dream-memory check-provider
 
 ## Model Profiles
 
-模型配置支持旧版 flat 字段，也支持新版命名 profiles。旧字段仍可继续使用：
-
-```json
-{
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-6",
-  "api_key_env": "ANTHROPIC_API_KEY",
-  "base_url": null,
-  "timeout_seconds": 60
-}
-```
-
-如果没有配置 `models`，系统会把上面的字段自动归一化成 `default` profile。
-
-新版配置可以显式声明多个 profile 和 fallback chain：
+模型配置必须使用命名 profiles，并显式声明 fallback chain。旧版顶层 `provider/model/api_key_env/base_url/timeout_seconds` 写法不再兼容：
 
 ```json
 {

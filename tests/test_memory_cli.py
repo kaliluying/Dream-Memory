@@ -290,8 +290,9 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(config_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["provider"], "anthropic")
-            self.assertEqual(payload["model"], "claude-sonnet-4-6")
+            self.assertEqual(payload["models"]["primary"]["provider"], "anthropic")
+            self.assertEqual(payload["models"]["primary"]["model"], "claude-sonnet-4-6")
+            self.assertEqual(payload["model_policy"]["fallback_chain"], ["primary"])
 
     def test_dream_uses_config_for_output_model_and_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -300,7 +301,18 @@ class MemoryCliTests(unittest.TestCase):
             output_dir = root / "configured-memory"
             config_path = root / "config.json"
             events.write_text(json.dumps({"source": "codex", "role": "user", "content": "希望项目像 Claude Code", "project": str(root)}, ensure_ascii=False) + "\n", encoding="utf-8")
-            config_path.write_text(json.dumps({"provider": "anthropic", "model": "test-model", "invoke_model": False, "output_dir": str(output_dir)}, ensure_ascii=False), encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "models": {
+                    "primary": {
+                        "provider": "anthropic",
+                        "model": "test-model",
+                        "api_key_env": "ANTHROPIC_API_KEY",
+                    }
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+                "invoke_model": False,
+                "output_dir": str(output_dir),
+            }, ensure_ascii=False), encoding="utf-8")
 
             exit_code = main(["--config", str(config_path), "dream", "--input", str(events), "--project", str(root)])
 
@@ -396,7 +408,16 @@ class MemoryCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             config_path.write_text(
-                json.dumps({"provider": "openai", "model": "gpt-test", "api_key_env": "sk-not-an-env-var"}),
+                json.dumps({
+                    "models": {
+                        "primary": {
+                            "provider": "openai",
+                            "model": "gpt-test",
+                            "api_key_env": "sk-not-an-env-var",
+                        }
+                    },
+                    "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+                }),
                 encoding="utf-8",
             )
 

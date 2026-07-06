@@ -11,23 +11,33 @@ class MemoryConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = load_memory_config(Path(tmp) / "missing.json")
 
-            self.assertEqual(config["model"], DEFAULT_MEMORY_CONFIG["model"])
+            self.assertEqual(config["models"]["primary"]["model"], DEFAULT_MEMORY_CONFIG["models"]["primary"]["model"])
             self.assertTrue(config["invoke_model"])
             self.assertEqual(config["output_dir"], ".dream-memory")
 
     def test_load_memory_config_merges_json_over_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            path.write_text(json.dumps({"provider": "openai", "model": "gpt-4.1", "invoke_model": False}), encoding="utf-8")
+            path.write_text(json.dumps({
+                "models": {
+                    "primary": {
+                        "provider": "openai",
+                        "model": "gpt-4.1",
+                        "api_key_env": "OPENAI_API_KEY",
+                    }
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+                "invoke_model": False,
+            }), encoding="utf-8")
 
             config = load_memory_config(path)
 
-            self.assertEqual(config["provider"], "openai")
-            self.assertEqual(config["model"], "gpt-4.1")
+            self.assertEqual(config["models"]["primary"]["provider"], "openai")
+            self.assertEqual(config["models"]["primary"]["model"], "gpt-4.1")
             self.assertFalse(config["invoke_model"])
             self.assertEqual(config["mode"], "ai")
 
-    def test_load_memory_config_adds_implicit_model_profile_for_flat_config(self):
+    def test_load_memory_config_rejects_flat_model_config_without_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             path.write_text(json.dumps({
@@ -37,14 +47,10 @@ class MemoryConfigTests(unittest.TestCase):
                 "timeout_seconds": 45,
             }), encoding="utf-8")
 
-            config = load_memory_config(path)
+            with self.assertRaises(ValueError) as raised:
+                load_memory_config(path)
 
-            self.assertEqual(config["models"]["default"]["provider"], "openai")
-            self.assertEqual(config["models"]["default"]["model"], "gpt-4.1")
-            self.assertEqual(config["models"]["default"]["api_key_env"], "OPENAI_API_KEY")
-            self.assertEqual(config["models"]["default"]["timeout_seconds"], 45)
-            self.assertEqual(config["model_policy"]["default_profile"], "default")
-            self.assertEqual(config["model_policy"]["fallback_chain"], ["default"])
+            self.assertIn("models", str(raised.exception))
 
     def test_load_memory_config_preserves_named_profiles_and_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,7 +89,8 @@ class MemoryConfigTests(unittest.TestCase):
             path = write_default_memory_config(Path(tmp) / "config.json")
             payload = json.loads(path.read_text(encoding="utf-8"))
 
-            self.assertEqual(payload["model"], DEFAULT_MEMORY_CONFIG["model"])
+            self.assertEqual(payload["models"]["primary"]["model"], DEFAULT_MEMORY_CONFIG["models"]["primary"]["model"])
+            self.assertEqual(payload["model_policy"]["fallback_chain"], ["primary"])
             self.assertIn("output_dir", payload)
 
 

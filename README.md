@@ -34,7 +34,7 @@ uv run dream-memory --help
 - `openai`
 - `openrouter`
 
-模型层支持命名 profiles、重试和 fallback chain。旧版单模型字段仍然兼容；如果没有配置 `models`，系统会自动把 `provider/model/api_key_env/base_url/timeout_seconds` 归一化成 `default` profile。
+模型层使用命名 profiles、重试和 fallback chain。配置文件必须声明 `models` 和 `model_policy`；旧版顶层 `provider/model/api_key_env/base_url/timeout_seconds` 写法不再兼容。
 
 ## 配置文件
 
@@ -54,11 +54,6 @@ uv run dream-memory --config ./memory-config.json init-config --output ./memory-
 
 ```json
 {
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-6",
-  "api_key_env": "ANTHROPIC_API_KEY",
-  "base_url": null,
-  "timeout_seconds": 60,
   "invoke_model": true,
   "mode": "ai",
   "output_dir": ".dream-memory",
