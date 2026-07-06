@@ -157,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--memory-cards")
     context.add_argument("--limit", type=int)
     context.add_argument("--format", choices=["json", "markdown"])
+    context.add_argument("--task", help="Task text used to rank relevant memory")
 
     pipeline = sub.add_parser("pipeline", help="Run dream and review in one step")
     pipeline.add_argument("--input", required=True)
@@ -620,7 +621,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "context":
         memory_cards_path = str(_value(args.memory_cards, config["memory_cards"]))
         cards = load_events_jsonl(Path(memory_cards_path))
-        payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])))
+        payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])), task=args.task)
         context_format = str(_value(args.format, config["context_format"]))
         if context_format == "markdown":
             print(render_context_markdown(payload), end="")

@@ -6,6 +6,7 @@ from pathlib import Path
 from dream_memory.memory_agent import build_memory_extraction_prompt
 from dream_memory.memory_dreaming import (
     DreamResult,
+    analyze_dream_candidate,
     apply_reviewed_memory,
     build_agent_context,
     build_candidates_from_facts,
@@ -16,6 +17,7 @@ from dream_memory.memory_dreaming import (
     extract_atomic_facts,
     load_events_jsonl,
     normalize_memory_text,
+    normalize_project_path,
     render_context_markdown,
     score_candidate,
 )
@@ -239,6 +241,325 @@ class MemoryDreamingTests(unittest.TestCase):
 
         self.assertEqual(conflicts["cand_1"][0]["memory_id"], "mem_1")
 
+    def test_build_review_queue_adds_quality_signals_and_action_suggestions(self):
+        candidates = [
+            {
+                "id": "cand_duplicate",
+                "scope": "project",
+                "project": "/tmp/project",
+                "type": "decision",
+                "content": "项目目标是 Claude Code 风格助手。",
+                "score": 0.92,
+                "status": "promote",
+                "evidence": [{"event_id": "event_1"}],
+                "tags": ["claude-code"],
+            },
+            {
+                "id": "cand_replace",
+                "scope": "project",
+                "project": "/tmp/project",
+                "type": "decision",
+                "content": "项目目标是 Claude Code 风格的本地研发助手。",
+                "score": 0.9,
+                "status": "promote",
+                "evidence": [{"event_id": "event_2"}, {"event_id": "event_3"}],
+                "tags": ["claude-code", "product-direction"],
+            },
+            {
+                "id": "cand_more_evidence",
+                "scope": "project",
+                "project": "/tmp/project",
+                "type": "workflow",
+                "content": "构建前需要先跑 smoke 测试。",
+                "score": 0.48,
+                "status": "review",
+                "evidence": [],
+                "tags": ["workflow"],
+            },
+        ]
+        memory_cards = [
+            {
+                "id": "mem_same",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "decision",
+                "summary": "项目目标是 Claude Code 风格助手。",
+                "status": "active",
+                "retrieval_hints": ["claude-code"],
+            },
+            {
+                "id": "mem_old",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "decision",
+                "summary": "项目目标是通用聊天机器人。",
+                "status": "active",
+                "retrieval_hints": ["chatbot"],
+            },
+        ]
+
+        queue = build_review_queue(candidates, memory_cards)
+        by_id = {item["candidate_id"]: item for item in queue}
+
+        self.assertEqual(by_id["cand_duplicate"]["suggested_action"], "reject")
+        self.assertTrue(by_id["cand_duplicate"]["quality_signals"]["duplicate"])
+        self.assertEqual(by_id["cand_duplicate"]["quality_signals"]["matched_memory_id"], "mem_same")
+        self.assertEqual(by_id["cand_replace"]["suggested_action"], "merge")
+        self.assertEqual(by_id["cand_replace"]["quality_signals"]["matched_memory_id"], "mem_same")
+        self.assertGreater(by_id["cand_replace"]["quality_signals"]["evidence_strength"], 0)
+        self.assertEqual(by_id["cand_more_evidence"]["suggested_action"], "needs_more_evidence")
+        self.assertEqual(by_id["cand_more_evidence"]["quality_signals"]["evidence_strength"], 0)
+
+    def test_analyze_dream_candidate_rejects_one_off_task(self):
+        candidate = {
+            "id": "mem_task",
+            "type": "requirement",
+            "scope": "project",
+            "project": "/tmp/project",
+            "content": "删除首页水印按钮",
+            "score": 0.9,
+            "evidence": [{"event_id": "event_1"}],
+        }
+        analysis = analyze_dream_candidate(
+            candidate,
+            quality_signals={
+                "stability": 0.2,
+                "reuse_value": 0.1,
+                "evidence_strength": 0.5,
+                "one_off_task": True,
+                "duplicate": False,
+                "similarity": 0.0,
+                "matched_memory_id": None,
+            },
+            conflicts=[],
+        )
+
+        self.assertEqual(analysis["suggested_action"], "reject")
+        self.assertIn("one-off task", analysis["penalties"])
+        self.assertLess(analysis["dream_score"], 0.45)
+
+    def test_analyze_dream_candidate_requires_evidence(self):
+        candidate = {
+            "id": "mem_no_evidence",
+            "type": "workflow",
+            "scope": "project",
+            "project": "/tmp/project",
+            "content": "Run targeted tests before changing memory logic.",
+            "score": 0.9,
+            "evidence": [],
+        }
+        analysis = analyze_dream_candidate(
+            candidate,
+            quality_signals={
+                "stability": 0.9,
+                "reuse_value": 0.8,
+                "evidence_strength": 0.0,
+                "one_off_task": False,
+                "duplicate": False,
+                "similarity": 0.0,
+                "matched_memory_id": None,
+            },
+            conflicts=[],
+        )
+
+        self.assertEqual(analysis["suggested_action"], "needs_more_evidence")
+        self.assertIn("missing evidence", analysis["penalties"])
+
+    def test_analyze_dream_candidate_creates_durable_memory(self):
+        candidate = {
+            "id": "mem_workflow",
+            "type": "workflow",
+            "scope": "project",
+            "project": "/tmp/project",
+            "content": "Run targeted tests before changing memory logic.",
+            "score": 0.88,
+            "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
+        }
+        analysis = analyze_dream_candidate(
+            candidate,
+            quality_signals={
+                "stability": 0.9,
+                "reuse_value": 0.85,
+                "evidence_strength": 0.75,
+                "one_off_task": False,
+                "duplicate": False,
+                "similarity": 0.0,
+                "matched_memory_id": None,
+            },
+            conflicts=[],
+        )
+
+        self.assertEqual(analysis["suggested_action"], "create")
+        self.assertGreaterEqual(analysis["dream_score"], 0.7)
+        self.assertIn("high stability", analysis["reasons"])
+        self.assertIn("high reuse value", analysis["reasons"])
+
+    def test_analyze_dream_candidate_merges_similar_memory(self):
+        candidate = {
+            "id": "mem_merge",
+            "type": "workflow",
+            "scope": "project",
+            "project": "/tmp/project",
+            "content": "Run targeted tests before memory changes.",
+            "score": 0.8,
+            "evidence": [{"event_id": "event_1"}],
+        }
+        analysis = analyze_dream_candidate(
+            candidate,
+            quality_signals={
+                "stability": 0.8,
+                "reuse_value": 0.8,
+                "evidence_strength": 0.5,
+                "one_off_task": False,
+                "duplicate": False,
+                "similarity": 0.42,
+                "matched_memory_id": "mem_existing",
+            },
+            conflicts=[],
+        )
+
+        self.assertEqual(analysis["suggested_action"], "merge")
+        self.assertEqual(analysis["matched_memory_id"], "mem_existing")
+        self.assertIn("similar existing memory", analysis["reasons"])
+
+    def test_build_review_queue_includes_dream_analysis(self):
+        candidates = [
+            {
+                "id": "mem_workflow",
+                "type": "workflow",
+                "scope": "project",
+                "project": "/tmp/project",
+                "content": "Run targeted tests before memory changes.",
+                "score": 0.9,
+                "status": "promote",
+                "tags": ["workflow"],
+                "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
+            }
+        ]
+
+        queue = build_review_queue(candidates, [])
+
+        self.assertEqual(len(queue), 1)
+        self.assertIn("dream_analysis", queue[0])
+        self.assertEqual(queue[0]["suggested_action"], queue[0]["dream_analysis"]["suggested_action"])
+        self.assertIn(queue[0]["suggested_action"], {"create", "review"})
+        self.assertGreater(queue[0]["dream_analysis"]["dream_score"], 0)
+
+    def test_build_review_queue_uses_dream_analysis_for_one_off_reject(self):
+        candidates = [
+            {
+                "id": "mem_task",
+                "type": "requirement",
+                "scope": "project",
+                "project": "/tmp/project",
+                "content": "删除首页水印按钮",
+                "score": 0.95,
+                "status": "promote",
+                "tags": ["task"],
+                "evidence": [{"event_id": "event_1"}],
+            }
+        ]
+
+        queue = build_review_queue(candidates, [])
+
+        self.assertEqual(queue[0]["suggested_action"], "reject")
+        self.assertEqual(queue[0]["dream_analysis"]["suggested_action"], "reject")
+        self.assertIn("one-off task", queue[0]["dream_analysis"]["penalties"])
+
+    def test_build_review_queue_matches_most_similar_conflict(self):
+        candidates = [
+            {
+                "id": "mem_workflow",
+                "type": "workflow",
+                "scope": "project",
+                "project": "/tmp/project",
+                "content": "Run targeted tests before memory changes.",
+                "score": 0.9,
+                "status": "promote",
+                "tags": ["workflow"],
+                "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
+            }
+        ]
+        memory_cards = [
+            {
+                "id": "mem_less_similar",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "Document release notes after deployment.",
+                "status": "active",
+            },
+            {
+                "id": "mem_more_similar",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "Run targeted tests before changing memory logic.",
+                "status": "active",
+            },
+        ]
+
+        queue = build_review_queue(candidates, memory_cards)
+
+        self.assertEqual(queue[0]["quality_signals"]["matched_memory_id"], "mem_more_similar")
+        self.assertEqual(queue[0]["dream_analysis"]["matched_memory_id"], "mem_more_similar")
+
+    def test_dream_from_events_writes_explainable_dream_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / ".dream" / "memory"
+            candidates = [
+                {
+                    "id": "mem_workflow",
+                    "type": "workflow",
+                    "scope": "project",
+                    "project": normalize_project_path("/tmp/project"),
+                    "content": "Run targeted tests before memory changes.",
+                    "score": 0.9,
+                    "status": "promote",
+                    "tags": ["workflow"],
+                    "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
+                },
+                {
+                    "id": "mem_task",
+                    "type": "requirement",
+                    "scope": "project",
+                    "project": normalize_project_path("/tmp/project"),
+                    "content": "删除首页水印按钮",
+                    "score": 0.95,
+                    "status": "promote",
+                    "tags": ["task"],
+                    "evidence": [{"event_id": "event_3"}],
+                },
+            ]
+
+            result = dream_from_events(
+                [{"event_id": "event_1", "source": "codex", "role": "user", "content": "memory input"}],
+                project="/tmp/project",
+                output_dir=output_dir,
+                agent_candidates=candidates,
+                agent_mode=True,
+            )
+
+            report = Path(result.dreams_path).read_text(encoding="utf-8")
+            self.assertIn("## Promotion Policy", report)
+            self.assertIn("## Action Summary", report)
+            self.assertIn("## Create", report)
+            self.assertIn("## Reject", report)
+            self.assertIn("dream_score=", report)
+            self.assertIn("reasons:", report)
+            self.assertIn("penalties:", report)
+            self.assertIn("one-off task", report)
+            preview = Path(result.memory_preview_path).read_text(encoding="utf-8")
+            written_candidates = [
+                json.loads(line)
+                for line in Path(result.candidates_path).read_text(encoding="utf-8").splitlines()
+            ]
+            by_id = {candidate["id"]: candidate for candidate in written_candidates}
+            self.assertEqual(by_id["mem_task"]["status"], "reject")
+            self.assertEqual(by_id["mem_task"]["dream_analysis"]["suggested_action"], "reject")
+            self.assertNotIn("删除首页水印按钮", preview)
+            self.assertEqual(result.rejected_count, 1)
+
     def test_apply_reviewed_memory_writes_memory_cards_and_markdown_projection(self):
         reviewed = [{
             "candidate_id": "cand_1",
@@ -276,6 +597,18 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(context["items"][0]["id"], "mem_3")
         self.assertEqual(context["items"][1]["id"], "mem_2")
         self.assertEqual(context["items"][2]["id"], "mem_1")
+
+    def test_build_agent_context_prioritizes_task_relevant_memory(self):
+        cards = [
+            {"id": "workflow", "scope": "project", "project": "/tmp/project", "memory_type": "workflow", "summary": "部署前必须先跑 smoke 测试。", "retrieval_hints": ["deploy", "smoke"], "tags": ["testing"], "status": "active"},
+            {"id": "decision", "scope": "project", "project": "/tmp/project", "memory_type": "decision", "summary": "项目目标是 Claude Code 风格助手。", "retrieval_hints": ["claude-code"], "tags": ["product"], "status": "active"},
+            {"id": "user", "scope": "user", "project": None, "memory_type": "preference", "summary": "用户偏好中文回答。", "retrieval_hints": ["language"], "status": "active"},
+        ]
+
+        context = build_agent_context(cards, project="/tmp/project", task="准备部署并执行 smoke 测试", limit=2)
+
+        self.assertEqual([item["id"] for item in context["items"]], ["workflow", "user"])
+        self.assertEqual(context["task"], "准备部署并执行 smoke 测试")
 
     def test_extract_atomic_facts_drops_secret_like_content(self):
         events = [{

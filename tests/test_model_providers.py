@@ -16,6 +16,7 @@ from dream_memory.model_providers import (
     _openai_chat_completions_url,
     _post_json,
     _raise_provider_payload_error,
+    list_provider_models,
     parse_model_ref,
     provider_diagnostics,
     runtime_parts_from_config,
@@ -80,7 +81,7 @@ class ModelProviderTests(unittest.TestCase):
                 "model_policy": {
                     "default_profile": "primary",
                     "fallback_chain": ["primary", "backup"],
-                    "retry": {"max_attempts": 2},
+                    "retry": {"max_attempts": 2, "switch_model_on_retry": True},
                 },
             }
         )
@@ -91,6 +92,7 @@ class ModelProviderTests(unittest.TestCase):
         self.assertEqual(policy.default_profile, "primary")
         self.assertEqual(policy.fallback_chain, ["primary", "backup"])
         self.assertEqual(policy.retry.max_attempts, 2)
+        self.assertTrue(policy.retry.switch_model_on_retry)
 
     def test_provider_diagnostics_accepts_direct_api_key_without_exposing_secret(self):
         payload = provider_diagnostics(
@@ -140,6 +142,48 @@ class ModelProviderTests(unittest.TestCase):
             _openai_chat_completions_url("http://localhost:3000/v1/chat/completions", default),
             "http://localhost:3000/v1/chat/completions",
         )
+
+    def test_list_provider_models_reads_openai_compatible_models_endpoint(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"id": "local-model-b"}, {"id": "local-model-a"}]}).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=Response()) as urlopen:
+            models = list_provider_models(
+                ProviderConfig(provider="openai", model="ignored", api_key="sk-test", base_url="http://localhost:3000", timeout_seconds=3)
+            )
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://localhost:3000/v1/models")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.headers["Authorization"], "Bearer sk-test")
+        self.assertEqual(models, ["local-model-a", "local-model-b"])
+
+    def test_list_provider_models_reads_anthropic_models_endpoint(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"id": "claude-test-2"}, {"id": "claude-test-1"}]}).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=Response()) as urlopen:
+            models = list_provider_models(ProviderConfig(provider="anthropic", model="ignored", api_key="anthropic-key", timeout_seconds=3))
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.anthropic.com/v1/models?limit=100")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.headers["X-api-key"], "anthropic-key")
+        self.assertEqual(models, ["claude-test-1", "claude-test-2"])
 
     def test_post_json_reports_non_json_response_with_url_preview(self):
         class Response:
@@ -195,6 +239,51 @@ class ModelProviderTests(unittest.TestCase):
         self.assertTrue(result.attempts[0].retryable)
         self.assertFalse(result.attempts[0].ok)
         self.assertTrue(result.attempts[1].ok)
+
+    def test_model_runtime_can_switch_profiles_between_retry_attempts(self):
+        attempts = []
+        events = []
+
+        def provider_factory(config):
+            class Provider:
+                def invoke(self, prompt):
+                    attempts.append(config.model)
+                    if config.model == "bad-model":
+                        raise ModelHTTPError(429, "rate limited")
+                    return '{"candidates":[]}'
+
+            return Provider()
+
+        runtime = ModelRuntime(provider_factory=provider_factory, sleeper=lambda _: None)
+        result = runtime.invoke(
+            "prompt",
+            profiles={
+                "primary": ModelProfile("primary", ProviderConfig("anthropic", "bad-model", "A")),
+                "backup": ModelProfile("backup", ProviderConfig("openai", "good-model", "B")),
+            },
+            policy=ModelPolicy(
+                default_profile="primary",
+                fallback_chain=["primary", "backup"],
+                retry=RetryPolicy(max_attempts=2, switch_model_on_retry=True),
+            ),
+            trace_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+
+        self.assertEqual(attempts, ["bad-model", "good-model"])
+        self.assertEqual(result.text, '{"candidates":[]}')
+        self.assertEqual(result.selected_profile, "backup")
+        self.assertEqual([attempt.profile for attempt in result.attempts], ["primary", "backup"])
+        self.assertEqual(result.attempts[0].attempt, 1)
+        self.assertEqual(result.attempts[1].attempt, 1)
+        self.assertTrue(
+            any(
+                event_type == "model_fallback_used"
+                and payload["from_profile"] == "primary"
+                and payload["to_profile"] == "backup"
+                and payload["reason"] == "retry_switch_model"
+                for event_type, payload in events
+            )
+        )
 
     def test_model_runtime_falls_back_to_backup_profile(self):
         def provider_factory(config):

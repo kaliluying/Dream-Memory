@@ -65,6 +65,7 @@ class RetryPolicy:
     max_delay_seconds: float = 8.0
     retry_on_status: list[int] = field(default_factory=lambda: [429, 500, 502, 503, 504])
     retry_on_timeout: bool = True
+    switch_model_on_retry: bool = False
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,38 @@ class ModelRuntimeResult:
 TraceCallback = Callable[[str, dict[str, Any]], None]
 
 SUPPORTED_MODEL_PROVIDERS = {"anthropic", "openai", "openrouter"}
+
+MODEL_CATALOG: dict[str, dict[str, Any]] = {
+    "anthropic": {
+        "label": "Anthropic",
+        "models": [
+            "claude-sonnet-4-6",
+            "claude-opus-4-1",
+            "claude-haiku-4-5",
+            "claude-3-5-sonnet-latest",
+        ],
+    },
+    "openai": {
+        "label": "OpenAI",
+        "models": [
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o3-mini",
+        ],
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "models": [
+            "openai/gpt-4.1",
+            "anthropic/claude-sonnet-4.5",
+            "google/gemini-2.5-pro",
+            "meta-llama/llama-3.3-70b-instruct",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        ],
+    },
+}
 
 
 class StaticModelProvider:
@@ -251,6 +284,14 @@ class ModelRuntime:
         attempts: list[ModelAttempt] = []
         started = time.monotonic()
         chain = policy.fallback_chain or [policy.default_profile]
+        if policy.retry.switch_model_on_retry:
+            result = self._invoke_switching_profiles(prompt, profiles=profiles, policy=policy, chain=chain, attempts=attempts, trace_callback=trace_callback)
+            if result is not None:
+                selected_profile, text = result
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                return ModelRuntimeResult(text=text, selected_profile=selected_profile, attempts=attempts, elapsed_ms=elapsed_ms)
+            self._emit(trace_callback, "model_runtime_failed", {"attempt_count": len(attempts), "profiles": chain})
+            raise ModelRuntimeError(attempts)
         for index, profile_name in enumerate(chain):
             profile = profiles.get(profile_name)
             if profile is None:
@@ -281,6 +322,66 @@ class ModelRuntime:
         self._emit(trace_callback, "model_runtime_failed", {"attempt_count": len(attempts), "profiles": chain})
         raise ModelRuntimeError(attempts)
 
+    def _invoke_switching_profiles(
+        self,
+        prompt: str,
+        *,
+        profiles: dict[str, ModelProfile],
+        policy: ModelPolicy,
+        chain: list[str],
+        attempts: list[ModelAttempt],
+        trace_callback: TraceCallback | None,
+    ) -> tuple[str, str] | None:
+        delay = policy.retry.initial_delay_seconds
+        max_attempts = max(1, int(policy.retry.max_attempts))
+        visited_profiles: set[str] = set()
+        for attempt_index in range(1, max_attempts + 1):
+            profile_name = chain[(attempt_index - 1) % len(chain)]
+            visited_profiles.add(profile_name)
+            profile = profiles.get(profile_name)
+            if profile is None:
+                attempt = ModelAttempt(
+                    profile=profile_name,
+                    provider="",
+                    model="",
+                    attempt=1,
+                    ok=False,
+                    retryable=False,
+                    elapsed_ms=0,
+                    error_kind="ModelProviderError",
+                    error=f"unknown model profile: {profile_name}",
+                )
+                attempts.append(attempt)
+                self._emit(trace_callback, "model_attempt_failed", attempt.to_dict())
+                continue
+            result = self._invoke_profile_once(prompt, profile=profile, attempt_index=1, policy=policy, attempts=attempts, trace_callback=trace_callback)
+            if result is not None:
+                return profile.name, result
+            last_attempt = attempts[-1] if attempts else None
+            if last_attempt is None or not last_attempt.retryable:
+                return None
+            if attempt_index == max_attempts:
+                return None
+            next_profile = chain[attempt_index % len(chain)]
+            self._emit(
+                trace_callback,
+                "model_fallback_used",
+                {"from_profile": profile_name, "to_profile": next_profile, "reason": "retry_switch_model"},
+            )
+            self.sleeper(min(delay, policy.retry.max_delay_seconds))
+            delay *= policy.retry.backoff_factor
+
+        for profile_name in chain:
+            if profile_name in visited_profiles:
+                continue
+            profile = profiles.get(profile_name)
+            if profile is None:
+                continue
+            result = self._invoke_profile(prompt, profile=profile, policy=policy, attempts=attempts, trace_callback=trace_callback)
+            if result is not None:
+                return profile.name, result
+        return None
+
     def _invoke_profile(
         self,
         prompt: str,
@@ -293,6 +394,26 @@ class ModelRuntime:
         delay = policy.retry.initial_delay_seconds
         max_attempts = max(1, int(policy.retry.max_attempts))
         for attempt_index in range(1, max_attempts + 1):
+            result = self._invoke_profile_once(prompt, profile=profile, attempt_index=attempt_index, policy=policy, attempts=attempts, trace_callback=trace_callback)
+            if result is not None:
+                return result
+            last_attempt = attempts[-1] if attempts else None
+            if last_attempt is None or not last_attempt.retryable or attempt_index == max_attempts:
+                return None
+            self.sleeper(min(delay, policy.retry.max_delay_seconds))
+            delay *= policy.retry.backoff_factor
+        return None
+
+    def _invoke_profile_once(
+        self,
+        prompt: str,
+        *,
+        profile: ModelProfile,
+        attempt_index: int,
+        policy: ModelPolicy,
+        attempts: list[ModelAttempt],
+        trace_callback: TraceCallback | None,
+    ) -> str | None:
             self._emit(
                 trace_callback,
                 "model_attempt_started",
@@ -323,10 +444,7 @@ class ModelRuntime:
                 )
                 attempts.append(attempt)
                 self._emit(trace_callback, "model_attempt_failed", attempt.to_dict())
-                if not retryable or attempt_index == max_attempts:
-                    return None
-                self.sleeper(min(delay, policy.retry.max_delay_seconds))
-                delay *= policy.retry.backoff_factor
+                return None
             else:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 attempt = ModelAttempt(
@@ -341,7 +459,6 @@ class ModelRuntime:
                 attempts.append(attempt)
                 self._emit(trace_callback, "model_attempt_succeeded", attempt.to_dict())
                 return text
-        return None
 
     @staticmethod
     def _is_retryable(exc: Exception, retry: RetryPolicy) -> bool:
@@ -368,6 +485,7 @@ def _retry_policy_from_config(value: dict[str, Any] | None) -> RetryPolicy:
         max_delay_seconds=float(value.get("max_delay_seconds", 8.0)),
         retry_on_status=[int(status) for status in value.get("retry_on_status", [429, 500, 502, 503, 504])],
         retry_on_timeout=bool(value.get("retry_on_timeout", True)),
+        switch_model_on_retry=bool(value.get("switch_model_on_retry", False)),
     )
 
 
@@ -447,6 +565,31 @@ def invoke_model(
     return build_model_provider(config).invoke(prompt)
 
 
+def list_provider_models(config: ProviderConfig) -> list[str]:
+    if config.provider == "anthropic":
+        api_key = _api_key(config.api_key, config.api_key_env or "ANTHROPIC_API_KEY")
+        data = _get_json(
+            _anthropic_models_url(config.base_url),
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            timeout_seconds=config.timeout_seconds,
+        )
+        return _model_ids_from_payload(data)
+    if config.provider in {"openai", "openrouter"}:
+        default_env = "OPENROUTER_API_KEY" if config.provider == "openrouter" else "OPENAI_API_KEY"
+        api_key = _api_key(config.api_key, config.api_key_env or default_env)
+        default_url = "https://openrouter.ai/api/v1/models" if config.provider == "openrouter" else "https://api.openai.com/v1/models"
+        data = _get_json(
+            _openai_models_url(config.base_url, default_url),
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout_seconds=config.timeout_seconds,
+        )
+        return _model_ids_from_payload(data)
+    raise ValueError(f"Unsupported model provider: {config.provider}")
+
+
 def _api_key(api_key: str | None, env_var: str) -> str:
     if api_key:
         return api_key
@@ -493,6 +636,23 @@ def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str], ti
         raise ModelProviderError(f"Model provider returned non-JSON response from {url}: {preview}") from exc
 
 
+def _get_json(url: str, *, headers: dict[str, str], timeout_seconds: int) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        raise ModelHTTPError(exc.code, body) from exc
+    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        raise ModelTimeoutError(f"Model provider timeout: {exc}") from exc
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        preview = raw[:200].replace("\n", "\\n")
+        raise ModelProviderError(f"Model provider returned non-JSON response from {url}: {preview}") from exc
+
+
 def _openai_chat_completions_url(base_url: str | None, default_url: str) -> str:
     if not base_url:
         return default_url
@@ -502,6 +662,52 @@ def _openai_chat_completions_url(base_url: str | None, default_url: str) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/chat/completions"
     return f"{normalized}/v1/chat/completions"
+
+
+def _openai_models_url(base_url: str | None, default_url: str) -> str:
+    if not base_url:
+        return default_url
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    if normalized.endswith("/chat/completions"):
+        return f"{normalized.removesuffix('/chat/completions')}/models"
+    if normalized.endswith("/v1"):
+        return f"{normalized}/models"
+    return f"{normalized}/v1/models"
+
+
+def _anthropic_models_url(base_url: str | None) -> str:
+    if not base_url:
+        return "https://api.anthropic.com/v1/models?limit=100"
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    if normalized.endswith("/messages"):
+        return f"{normalized.removesuffix('/messages')}/models"
+    if normalized.endswith("/v1"):
+        return f"{normalized}/models"
+    return f"{normalized}/v1/models"
+
+
+def _model_ids_from_payload(data: dict[str, Any]) -> list[str]:
+    _raise_provider_payload_error(data)
+    raw_items = data.get("data")
+    if raw_items is None:
+        raw_items = data.get("models")
+    if not isinstance(raw_items, list):
+        raise ModelProviderError("Model provider response does not include a model list")
+    models: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            models.add(item)
+        elif isinstance(item, dict):
+            model_id = item.get("id") or item.get("name")
+            if model_id:
+                models.add(str(model_id))
+    if not models:
+        raise ModelProviderError("Model provider returned an empty model list")
+    return sorted(models)
 
 
 

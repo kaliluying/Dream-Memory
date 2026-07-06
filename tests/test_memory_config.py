@@ -72,7 +72,7 @@ class MemoryConfigTests(unittest.TestCase):
                 "model_policy": {
                     "default_profile": "primary",
                     "fallback_chain": ["primary", "backup"],
-                    "retry": {"max_attempts": 2},
+                    "retry": {"max_attempts": 2, "switch_model_on_retry": True},
                 },
             }), encoding="utf-8")
 
@@ -84,6 +84,7 @@ class MemoryConfigTests(unittest.TestCase):
             self.assertEqual(config["model_policy"]["default_profile"], "primary")
             self.assertEqual(config["model_policy"]["fallback_chain"], ["primary", "backup"])
             self.assertEqual(config["model_policy"]["retry"]["max_attempts"], 2)
+            self.assertTrue(config["model_policy"]["retry"]["switch_model_on_retry"])
             self.assertEqual(config["model_policy"]["retry"]["retry_on_status"], [429, 500, 502, 503, 504])
 
     def test_write_default_memory_config_creates_editable_file(self):

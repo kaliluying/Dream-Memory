@@ -42,15 +42,26 @@ def build_atomic_fact(
     }
 
 
-def build_review_queue_item(*, candidate: dict[str, Any], conflicts: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+def build_review_queue_item(
+    *,
+    candidate: dict[str, Any],
+    conflicts: list[dict[str, Any]],
+    suggested_action: str = "review",
+    quality_signals: dict[str, Any] | None = None,
+    dream_analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    item = {
         "candidate_id": candidate["id"],
         "status": "pending",
-        "suggested_action": "review",
+        "suggested_action": suggested_action,
         "candidate": candidate,
         "conflicts": conflicts,
+        "quality_signals": quality_signals or {},
         "created_at": _now_iso(),
     }
+    if dream_analysis is not None:
+        item["dream_analysis"] = dream_analysis
+    return item
 
 
 def build_review_decision(

@@ -4,7 +4,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .memory_agent import build_memory_extraction_prompt, extract_json_payload, validate_agent_candidates
+from .memory_agent import build_agent_candidates_from_payload, build_memory_extraction_prompt, extract_json_payload
 from .model_providers import invoke_model as invoke_model_provider
 from .model_providers import invoke_model_runtime
 
@@ -16,6 +16,7 @@ class MemoryExtractionState(TypedDict, total=False):
     invoke_model: bool
     prompt: str
     raw_response: str
+    atomic_facts: list[dict[str, Any]]
     candidates: list[dict[str, Any]]
     dry_run: bool
     runtime_config: dict[str, Any]
@@ -35,7 +36,7 @@ def _build_prompt_node(state: MemoryExtractionState) -> dict[str, Any]:
 def _invoke_model_node(state: MemoryExtractionState) -> dict[str, Any]:
     prompt = str(state.get("prompt") or "")
     if not state.get("invoke_model", False):
-        return {"dry_run": True, "candidates": []}
+        return {"dry_run": True, "atomic_facts": [], "candidates": []}
     runtime_config = state.get("runtime_config")
     if isinstance(runtime_config, dict):
         result = invoke_model_runtime(
@@ -50,10 +51,10 @@ def _invoke_model_node(state: MemoryExtractionState) -> dict[str, Any]:
 
 def _validate_candidates_node(state: MemoryExtractionState) -> dict[str, Any]:
     if state.get("dry_run", False):
-        return {"candidates": []}
+        return {"atomic_facts": [], "candidates": []}
     payload = extract_json_payload(str(state.get("raw_response") or ""))
-    candidates = validate_agent_candidates(list(payload.get("candidates", [])), project=state.get("project"))
-    return {"candidates": candidates}
+    atomic_facts, candidates = build_agent_candidates_from_payload(payload, project=state.get("project"))
+    return {"atomic_facts": atomic_facts, "candidates": candidates}
 
 
 def build_memory_extraction_graph():

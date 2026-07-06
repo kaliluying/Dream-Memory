@@ -33,6 +33,35 @@ def test_build_review_queue_item_starts_pending():
     assert queue_item["suggested_action"] == "review"
 
 
+def test_build_review_queue_item_includes_dream_analysis():
+    candidate = {
+        "id": "mem_1",
+        "type": "workflow",
+        "scope": "project",
+        "project": "/tmp/project",
+        "content": "Run focused tests before applying memory changes.",
+    }
+    analysis = {
+        "dream_score": 0.81,
+        "suggested_action": "create",
+        "reasons": ["high reuse value", "strong evidence"],
+        "penalties": [],
+        "policy": {"promote_threshold": 0.7},
+    }
+
+    item = build_review_queue_item(
+        candidate=candidate,
+        conflicts=[],
+        suggested_action="create",
+        quality_signals={"reuse_value": 0.9},
+        dream_analysis=analysis,
+    )
+
+    assert item["dream_analysis"] == analysis
+    assert item["suggested_action"] == "create"
+    assert item["quality_signals"] == {"reuse_value": 0.9}
+
+
 def test_build_memory_card_preserves_retrieval_metadata():
     card = build_memory_card(
         memory_id="mem_1",

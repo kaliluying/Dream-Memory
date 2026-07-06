@@ -266,10 +266,14 @@ class MemoryCliTests(unittest.TestCase):
             output_dir = root / "memory"
 
             exit_code = main(["dream", "--input", str(events), "--project", str(root), "--output-dir", str(output_dir), "--mode", "rules"])
+            dreams = (output_dir / "DREAMS.md").read_text(encoding="utf-8")
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "candidates.jsonl").exists())
             self.assertFalse((output_dir / "ai-candidates.jsonl").exists())
+            self.assertIn("## Promotion Policy", dreams)
+            self.assertIn("## Action Summary", dreams)
+            self.assertIn("dream_score=", dreams)
 
     def test_ai_mode_uses_config_default_and_dry_run_disables_it(self):
         parser = build_parser()
@@ -437,6 +441,25 @@ class MemoryCliTests(unittest.TestCase):
             }), encoding="utf-8")
 
             exit_code = main(["--config", str(config_path), "check-provider", "--all"])
+
+            self.assertEqual(exit_code, 0)
+
+    def test_context_cli_accepts_task_query_for_ranking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cards_path = root / "memory_cards.jsonl"
+            cards_path.write_text("\n".join([
+                json.dumps({"id": "deploy", "scope": "project", "project": "/tmp/project", "memory_type": "workflow", "summary": "部署前必须先跑 smoke 测试。", "retrieval_hints": ["deploy", "smoke"], "status": "active"}, ensure_ascii=False),
+                json.dumps({"id": "product", "scope": "project", "project": "/tmp/project", "memory_type": "decision", "summary": "项目目标是 Claude Code 风格助手。", "retrieval_hints": ["claude-code"], "status": "active"}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+
+            exit_code = main([
+                "context",
+                "--project", "/tmp/project",
+                "--memory-cards", str(cards_path),
+                "--task", "准备部署并执行 smoke 测试",
+                "--limit", "1",
+            ])
 
             self.assertEqual(exit_code, 0)
 

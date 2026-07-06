@@ -16,6 +16,20 @@ SENSITIVE_RE = re.compile(
 )
 BLOCKED_EVENT_TYPES = {"project_state", "tool_output", "build_log"}
 RAW_TRANSCRIPT_RE = re.compile(r"(^|\n)\s*(user|assistant|system)\s*:", re.I)
+TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,}")
+ONE_OFF_MEMORY_RE = re.compile(
+    r"(删除|修改|改为|改成|实现|新增|接入|修复|清理|迁移|跑|测试|生成).{0,24}(页面|组件|按钮|接口|脚本|水印|首页|配置|任务|数据)",
+    re.I,
+)
+DEFAULT_DREAM_PROMOTION_POLICY: dict[str, Any] = {
+    "promote_threshold": 0.7,
+    "review_threshold": 0.45,
+    "reject_one_off": True,
+    "require_evidence": True,
+    "duplicate_action": "reject",
+    "conflict_promote_action": "merge",
+}
+ACTION_ORDER = ["create", "merge", "needs_more_evidence", "review", "reject"]
 
 
 @dataclass(frozen=True)
@@ -79,6 +93,18 @@ def normalize_memory_text(value: str) -> str:
     text = re.sub(r"\s+", " ", str(value).strip().lower())
     text = re.sub(r"[。．.!！?？,，;；:：]+$", "", text)
     return text.strip()
+
+
+def _tokens(value: str) -> set[str]:
+    return {token.lower() for token in TOKEN_RE.findall(str(value)) if len(token.strip()) >= 2}
+
+
+def _text_similarity(left: str, right: str) -> float:
+    left_tokens = _tokens(normalize_memory_text(left))
+    right_tokens = _tokens(normalize_memory_text(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
 def _content_hash(value: str) -> str:
@@ -302,15 +328,37 @@ def build_candidates_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, A
             "content": content,
             "tags": list(fact.get("tags", [])),
             "evidence": [],
+            "retrieval_hints": [],
+            "quality_reason": "",
         })
-        for ref in fact.get("evidence_refs", []):
-            candidate["evidence"].append({
-                "event_id": ref,
-                "source": fact.get("source"),
-                "session_id": fact.get("session_id"),
-                "content_hash": _content_hash(content),
-            })
+        evidence_items = fact.get("evidence") if isinstance(fact.get("evidence"), list) else []
+        if evidence_items:
+            for evidence in evidence_items:
+                if not isinstance(evidence, dict):
+                    continue
+                candidate["evidence"].append({
+                    "event_id": evidence.get("event_id") or evidence.get("id"),
+                    "source": evidence.get("source") or fact.get("source"),
+                    "session_id": evidence.get("session_id") or fact.get("session_id"),
+                    "quote": evidence.get("quote"),
+                    "content_hash": _content_hash(content),
+                })
+        else:
+            for ref in fact.get("evidence_refs", []):
+                candidate["evidence"].append({
+                    "event_id": ref,
+                    "source": fact.get("source"),
+                    "session_id": fact.get("session_id"),
+                    "content_hash": _content_hash(content),
+                })
         candidate["tags"] = sorted(set(candidate.get("tags", []) + list(fact.get("tags", []))))
+        candidate["retrieval_hints"] = sorted(set(candidate.get("retrieval_hints", []) + [str(item) for item in fact.get("reuse_scenarios", [])]))
+        quality_reasons = [candidate.get("quality_reason", "")]
+        if fact.get("long_term") is not None:
+            quality_reasons.append(f"long_term={bool(fact.get('long_term'))}")
+        if fact.get("long_term_reason"):
+            quality_reasons.append(str(fact.get("long_term_reason")))
+        candidate["quality_reason"] = "; ".join(reason for reason in quality_reasons if reason)
     return [score_candidate(candidate) for candidate in candidates.values()]
 
 
@@ -340,9 +388,256 @@ def detect_candidate_conflicts(candidates: list[dict[str, Any]], memory_cards: l
     return conflicts
 
 
+def _active_matching_cards(candidate: dict[str, Any], memory_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidate_scope = candidate.get("scope")
+    candidate_project = normalize_project_path(str(candidate.get("project"))) if candidate.get("project") else None
+    candidate_type = candidate.get("type")
+    matches: list[dict[str, Any]] = []
+    for card in memory_cards:
+        if card.get("status", "active") != "active":
+            continue
+        card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
+        if card.get("scope") == candidate_scope and card_project == candidate_project and card.get("memory_type") == candidate_type:
+            matches.append(card)
+    return matches
+
+
+def explain_candidate_quality(candidate: dict[str, Any], memory_cards: list[dict[str, Any]]) -> dict[str, Any]:
+    content = str(candidate.get("content") or "")
+    normalized_content = normalize_memory_text(content)
+    evidence_count = len(candidate.get("evidence", []))
+    score = float(candidate.get("score", candidate.get("confidence", 0.0)) or 0.0)
+    memory_type = str(candidate.get("type") or "")
+    one_off = bool(ONE_OFF_MEMORY_RE.search(content)) or "task" in {str(tag).lower() for tag in candidate.get("tags", [])}
+    matching_cards = _active_matching_cards(candidate, memory_cards)
+    exact_match = next((card for card in matching_cards if normalize_memory_text(str(card.get("summary") or "")) == normalized_content), None)
+    similar_cards = [
+        (card, _text_similarity(content, str(card.get("summary") or "")))
+        for card in matching_cards
+        if normalize_memory_text(str(card.get("summary") or "")) != normalized_content
+    ]
+    similar_cards = [(card, similarity) for card, similarity in similar_cards if similarity >= 0.18]
+    best_similar = max(similar_cards, key=lambda item: item[1], default=(None, 0.0))
+    matched_card = exact_match or best_similar[0]
+    durable_types = {"preference", "decision", "workflow", "pitfall", "product_direction", "rejected_option"}
+    stability = 0.25
+    if memory_type in durable_types:
+        stability += 0.3
+    if evidence_count >= 2:
+        stability += 0.2
+    if score >= 0.8:
+        stability += 0.15
+    if one_off:
+        stability -= 0.35
+    reuse_value = 0.25
+    if memory_type in durable_types:
+        reuse_value += 0.3
+    if candidate.get("scope") in {"user", "global", "project"}:
+        reuse_value += 0.15
+    if candidate.get("tags"):
+        reuse_value += 0.1
+    if one_off:
+        reuse_value -= 0.3
+    return {
+        "stability": max(0.0, min(1.0, round(stability, 3))),
+        "reuse_value": max(0.0, min(1.0, round(reuse_value, 3))),
+        "evidence_strength": max(0.0, min(1.0, round(min(evidence_count, 4) / 4, 3))),
+        "one_off_task": one_off,
+        "duplicate": exact_match is not None,
+        "similarity": round(1.0 if exact_match else best_similar[1], 3),
+        "matched_memory_id": matched_card.get("id") if isinstance(matched_card, dict) else None,
+    }
+
+
+def _policy_value(policy: dict[str, Any], key: str, fallback: Any) -> Any:
+    value = policy.get(key, fallback)
+    if isinstance(fallback, bool):
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off", ""}
+        return bool(value)
+    if isinstance(fallback, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
+    if isinstance(fallback, str):
+        return str(value or fallback)
+    return value
+
+
+def _quality_float(quality_signals: dict[str, Any], key: str) -> float:
+    try:
+        return max(0.0, min(1.0, float(quality_signals.get(key, 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _candidate_score(candidate: dict[str, Any]) -> float:
+    try:
+        return max(0.0, min(1.0, float(candidate.get("score", candidate.get("confidence", 0.0)) or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def analyze_dream_candidate(
+    candidate: dict[str, Any],
+    *,
+    quality_signals: dict[str, Any],
+    conflicts: list[dict[str, Any]],
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    active_policy = dict(DEFAULT_DREAM_PROMOTION_POLICY)
+    if policy:
+        active_policy.update(policy)
+
+    promote_threshold = _policy_value(active_policy, "promote_threshold", 0.7)
+    review_threshold = _policy_value(active_policy, "review_threshold", 0.45)
+    reject_one_off = _policy_value(active_policy, "reject_one_off", True)
+    require_evidence = _policy_value(active_policy, "require_evidence", True)
+    duplicate_action = _policy_value(active_policy, "duplicate_action", "reject")
+    conflict_action = _policy_value(active_policy, "conflict_promote_action", "merge")
+
+    stability = _quality_float(quality_signals, "stability")
+    reuse_value = _quality_float(quality_signals, "reuse_value")
+    evidence_strength = _quality_float(quality_signals, "evidence_strength")
+    base_score = _candidate_score(candidate)
+    dream_score = round(
+        stability * 0.4
+        + reuse_value * 0.4
+        + evidence_strength * 0.1
+        + base_score * 0.1,
+        3,
+    )
+
+    reasons: list[str] = []
+    penalties: list[str] = []
+    if stability >= 0.7:
+        reasons.append("high stability")
+    if reuse_value >= 0.7:
+        reasons.append("high reuse value")
+    if evidence_strength >= 0.5:
+        reasons.append("strong evidence")
+    if conflicts:
+        reasons.append("conflicts with existing memory")
+    similarity = _quality_float(quality_signals, "similarity")
+    if quality_signals.get("matched_memory_id") and similarity > 0:
+        reasons.append("similar existing memory")
+
+    one_off = bool(quality_signals.get("one_off_task"))
+    duplicate = bool(quality_signals.get("duplicate"))
+    if duplicate:
+        penalties.append("duplicate")
+    if one_off:
+        penalties.append("one-off task")
+        dream_score = min(dream_score, max(0.0, review_threshold - 0.01))
+    if require_evidence and evidence_strength <= 0:
+        penalties.append("missing evidence")
+
+    if duplicate:
+        suggested_action = duplicate_action
+    elif reject_one_off and one_off:
+        suggested_action = "reject"
+    elif require_evidence and evidence_strength <= 0:
+        suggested_action = "needs_more_evidence"
+    elif (conflicts or quality_signals.get("matched_memory_id")) and dream_score >= review_threshold:
+        suggested_action = conflict_action
+    elif dream_score >= promote_threshold:
+        suggested_action = "create"
+    elif dream_score >= review_threshold:
+        suggested_action = "review"
+    else:
+        suggested_action = "reject"
+
+    return {
+        "dream_score": dream_score,
+        "suggested_action": suggested_action,
+        "reasons": reasons,
+        "penalties": penalties,
+        "matched_memory_id": quality_signals.get("matched_memory_id"),
+        "policy": {
+            "promote_threshold": promote_threshold,
+            "review_threshold": review_threshold,
+            "reject_one_off": reject_one_off,
+            "require_evidence": require_evidence,
+            "duplicate_action": duplicate_action,
+            "conflict_promote_action": conflict_action,
+        },
+    }
+
+
+def suggest_review_action(candidate: dict[str, Any], quality_signals: dict[str, Any], conflicts: list[dict[str, Any]]) -> str:
+    if quality_signals.get("duplicate"):
+        return "reject"
+    if quality_signals.get("one_off_task"):
+        return "reject"
+    if quality_signals.get("evidence_strength", 0) <= 0:
+        return "needs_more_evidence"
+    if conflicts:
+        return "replace" if candidate.get("status") == "promote" and quality_signals.get("evidence_strength", 0) >= 0.5 else "merge"
+    if quality_signals.get("similarity", 0) >= 0.18 and quality_signals.get("matched_memory_id"):
+        return "merge"
+    if candidate.get("status") == "reject":
+        return "reject"
+    return "create"
+
+
+def _signals_with_conflict_match(candidate: dict[str, Any], quality_signals: dict[str, Any], conflicts: list[dict[str, Any]]) -> dict[str, Any]:
+    if not conflicts or quality_signals.get("duplicate"):
+        return quality_signals
+    signals = dict(quality_signals)
+    candidate_content = str(candidate.get("content") or "")
+    selected = max(conflicts, key=lambda item: _text_similarity(str(item.get("summary") or ""), candidate_content))
+    signals["matched_memory_id"] = selected.get("memory_id")
+    signals["similarity"] = round(_text_similarity(str(selected.get("summary") or ""), candidate_content), 3)
+    return signals
+
+
+def _status_from_dream_action(action: str) -> str:
+    if action in {"create", "merge"}:
+        return "promote"
+    if action in {"review", "needs_more_evidence"}:
+        return "review"
+    return "reject"
+
+
+def apply_dream_analysis_to_candidates(candidates: list[dict[str, Any]], memory_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    conflict_map = detect_candidate_conflicts(candidates, memory_cards)
+    analyzed_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        conflicts = conflict_map.get(str(candidate["id"]), [])
+        quality_signals = _signals_with_conflict_match(candidate, explain_candidate_quality(candidate, memory_cards), conflicts)
+        dream_analysis = analyze_dream_candidate(
+            candidate,
+            quality_signals=quality_signals,
+            conflicts=conflicts,
+        )
+        analyzed = dict(candidate)
+        analyzed["quality_signals"] = quality_signals
+        analyzed["dream_analysis"] = dream_analysis
+        analyzed["status"] = _status_from_dream_action(str(dream_analysis["suggested_action"]))
+        analyzed_candidates.append(analyzed)
+    return analyzed_candidates
+
+
 def build_review_queue(candidates: list[dict[str, Any]], memory_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
     conflict_map = detect_candidate_conflicts(candidates, memory_cards)
-    return [build_review_queue_item(candidate=candidate, conflicts=conflict_map.get(str(candidate["id"]), [])) for candidate in candidates]
+    queue: list[dict[str, Any]] = []
+    for candidate in candidates:
+        conflicts = conflict_map.get(str(candidate["id"]), [])
+        quality_signals = _signals_with_conflict_match(candidate, explain_candidate_quality(candidate, memory_cards), conflicts)
+        dream_analysis = analyze_dream_candidate(
+            candidate,
+            quality_signals=quality_signals,
+            conflicts=conflicts,
+        )
+        queue.append(build_review_queue_item(
+            candidate=candidate,
+            conflicts=conflicts,
+            suggested_action=str(dream_analysis["suggested_action"]),
+            quality_signals=quality_signals,
+            dream_analysis=dream_analysis,
+        ))
+    return queue
 
 
 def render_memory_markdown(cards: list[dict[str, Any]]) -> str:
@@ -430,20 +725,43 @@ def apply_reviewed_memory(
     return cards, markdown
 
 
-def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | None, limit: int = 12) -> dict[str, Any]:
+def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | None, limit: int = 12, task: str | None = None) -> dict[str, Any]:
     normalized_project = normalize_project_path(project)
+    task_tokens = _tokens(task or "")
 
-    def rank(card: dict[str, Any]) -> tuple[int, str]:
+    def relevance(card: dict[str, Any]) -> float:
+        if not task_tokens:
+            return 0.0
+        searchable = " ".join(
+            str(value)
+            for value in [
+                card.get("summary"),
+                card.get("memory_type"),
+                " ".join(str(item) for item in card.get("retrieval_hints", []) if item),
+                " ".join(str(item) for item in card.get("tags", []) if item),
+            ]
+        )
+        card_tokens = _tokens(searchable)
+        if not card_tokens:
+            return 0.0
+        return len(task_tokens & card_tokens) / len(task_tokens)
+
+    def scope_rank(card: dict[str, Any]) -> int:
         card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
         if normalized_project and card.get("scope") == "project" and card_project == normalized_project:
-            return (0, str(card.get("summary")))
+            return 0
         if card.get("scope") == "user":
-            return (1, str(card.get("summary")))
+            return 1
         if card.get("scope") == "global":
-            return (2, str(card.get("summary")))
+            return 2
         if card.get("scope") == "session":
-            return (3, str(card.get("summary")))
-        return (4, str(card.get("summary")))
+            return 3
+        return 4
+
+    def rank(card: dict[str, Any]) -> tuple[float, int, int, str]:
+        card_relevance = relevance(card)
+        default_rank = 0 if task_tokens and card_relevance == 0 and card.get("scope") in {"user", "global"} else 1
+        return (-card_relevance, default_rank, scope_rank(card), str(card.get("summary")))
 
     filtered = []
     for card in memory_cards:
@@ -457,7 +775,10 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
             card["project"] = card_project
         filtered.append(card)
     ranked = sorted(filtered, key=rank)[:limit]
-    return {"project": normalized_project, "count": len(ranked), "items": ranked}
+    payload = {"project": normalized_project, "count": len(ranked), "items": ranked}
+    if task:
+        payload["task"] = task
+    return payload
 
 
 def render_context_markdown(context: dict[str, Any]) -> str:
@@ -469,10 +790,43 @@ def render_context_markdown(context: dict[str, Any]) -> str:
         lines.append(f"- **{prefix} / {item.get('memory_type')}**: {item.get('summary')}")
     return "\n".join(lines) + "\n"
 
+def _analysis_for_report(candidate: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(candidate.get("dream_analysis"), dict):
+        return dict(candidate["dream_analysis"])
+    quality_signals = explain_candidate_quality(candidate, [])
+    return analyze_dream_candidate(candidate, quality_signals=quality_signals, conflicts=[])
+
+
+def _action_heading(action: str) -> str:
+    return {
+        "create": "Create",
+        "merge": "Merge",
+        "needs_more_evidence": "Needs More Evidence",
+        "review": "Review",
+        "reject": "Reject",
+    }.get(action, action.replace("_", " ").title())
+
+
+def _candidate_report_line(candidate: dict[str, Any], analysis: dict[str, Any]) -> str:
+    reasons = ", ".join(str(item) for item in analysis.get("reasons", [])) or "none"
+    penalties = ", ".join(str(item) for item in analysis.get("penalties", [])) or "none"
+    return (
+        f"- ({candidate.get('type')}, dream_score={analysis.get('dream_score')}, "
+        f"action={analysis.get('suggested_action')}) {candidate.get('content')} "
+        f"[reasons: {reasons}; penalties: {penalties}]"
+    )
+
+
 def _render_dreams(events: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> str:
-    promoted = [c for c in candidates if c["status"] == "promote"]
-    review = [c for c in candidates if c["status"] == "review"]
-    rejected = [c for c in candidates if c["status"] == "reject"]
+    analyzed: list[tuple[dict[str, Any], dict[str, Any]]] = [
+        (candidate, _analysis_for_report(candidate))
+        for candidate in candidates
+    ]
+    counts = {action: 0 for action in ACTION_ORDER}
+    for _, analysis in analyzed:
+        action = str(analysis.get("suggested_action") or "review")
+        counts[action] = counts.get(action, 0) + 1
+    policy = DEFAULT_DREAM_PROMOTION_POLICY
     lines = [
         "# DREAMS.md",
         "",
@@ -482,18 +836,40 @@ def _render_dreams(events: list[dict[str, Any]], candidates: list[dict[str, Any]
         "",
         f"- Events scanned: {len(events)}",
         f"- Candidates: {len(candidates)}",
-        f"- Promote: {len(promoted)}",
-        f"- Review: {len(review)}",
-        f"- Reject: {len(rejected)}",
         "",
-        "## Promoted Candidates",
+        "## Promotion Policy",
+        "",
+        f"- Promote threshold: {policy['promote_threshold']}",
+        f"- Review threshold: {policy['review_threshold']}",
+        f"- Reject one-off tasks: {str(policy['reject_one_off']).lower()}",
+        f"- Require evidence: {str(policy['require_evidence']).lower()}",
+        "",
+        "## Action Summary",
         "",
     ]
-    for c in promoted[:30]:
-        lines.append(f"- ({c['type']}, {c['score']}) {c['content']}")
-    lines.extend(["", "## Review Candidates", ""])
-    for c in review[:30]:
-        lines.append(f"- ({c['type']}, {c['score']}) {c['content']}")
+    for action in ACTION_ORDER:
+        lines.append(f"- {_action_heading(action)}: {counts.get(action, 0)}")
+
+    grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {action: [] for action in ACTION_ORDER}
+    for candidate, analysis in analyzed:
+        action = str(analysis.get("suggested_action") or "review")
+        grouped.setdefault(action, []).append((candidate, analysis))
+
+    for action in ACTION_ORDER:
+        lines.extend(["", f"## {_action_heading(action)}", ""])
+        rows = sorted(
+            grouped.get(action, []),
+            key=lambda item: (
+                -float(item[1].get("dream_score", 0.0) or 0.0),
+                str(item[0].get("type") or ""),
+                str(item[0].get("content") or ""),
+            ),
+        )
+        if not rows:
+            lines.append("- None")
+            continue
+        for candidate, analysis in rows[:30]:
+            lines.append(_candidate_report_line(candidate, analysis))
     return "\n".join(lines) + "\n"
 
 
@@ -542,6 +918,7 @@ def dream_from_events(
         candidates = raw_candidates
     else:
         candidates = build_candidates_from_facts(facts)
+    candidates = apply_dream_analysis_to_candidates(candidates, [])
     candidates.sort(key=lambda item: (-item["score"], item["type"], item["content"]))
 
     candidates_path = output / ("ai-candidates.jsonl" if agent_mode else "candidates.jsonl")
