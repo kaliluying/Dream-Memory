@@ -34,7 +34,7 @@ uv run dream-memory --help
 - `openai`
 - `openrouter`
 
-模型层使用命名 profiles、重试和 fallback chain。配置文件必须声明 `models` 和 `model_policy`；旧版顶层 `provider/model/api_key_env/base_url/timeout_seconds` 写法不再兼容。
+模型层使用命名 profiles、重试和 fallback chain。配置文件必须声明 `models` 和 `model_policy`；旧版顶层 `provider/model/api_key/api_key_env/base_url/timeout_seconds` 写法不再兼容。
 
 ## 配置文件
 
@@ -72,14 +72,16 @@ uv run dream-memory --config ./memory-config.json init-config --output ./memory-
     "primary": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_key": "your-anthropic-api-key",
+      "api_key_env": null,
       "base_url": null,
       "timeout_seconds": 60
     },
     "openai_backup": {
       "provider": "openai",
       "model": "gpt-4.1",
-      "api_key_env": "OPENAI_API_KEY",
+      "api_key": "your-openai-api-key",
+      "api_key_env": null,
       "base_url": null,
       "timeout_seconds": 45
     }
@@ -119,13 +121,13 @@ uv run dream-memory check-provider --profile primary
 
 `check-provider --all` 会检查所有 configured profiles。`dream` / `pipeline` / `run` 会按 `model_policy.fallback_chain` 尝试模型；单个 profile 内会按 retry policy 对 `429/500/502/503/504` 和超时做有界指数退避重试。持久化 run 会把模型尝试、失败、成功和 fallback 事件写入 `trace.jsonl`。
 
-API Key 仍通过环境变量配置，例如：
+API Key 主用法是直接写在 `.dream-memory/config.json` 的 profile 里：
 
-```bash
-export ANTHROPIC_API_KEY="你的 key"
-# 或
-export OPENAI_API_KEY="你的 key"
+```json
+"api_key": "你的 key"
 ```
+
+`check-provider` 只输出 `api_key_configured` / `api_key_present`，不会打印明文 key。`api_key_env` 仍可作为可选兜底。
 
 ## 常用流程
 

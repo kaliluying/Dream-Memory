@@ -32,6 +32,7 @@ class MemoryRunStartRequest(BaseModel):
     mode: str | None = None
     provider: str | None = None
     model: str | None = None
+    api_key: str | None = None
     api_key_env: str | None = None
     base_url: str | None = None
     timeout_seconds: int | None = None
@@ -273,6 +274,7 @@ def _run_namespace(request: MemoryRunStartRequest, memory_dir: Path) -> Namespac
         mode=request.mode,
         provider=request.provider,
         model=request.model,
+        api_key=request.api_key,
         api_key_env=request.api_key_env,
         base_url=request.base_url,
         timeout_seconds=request.timeout_seconds,

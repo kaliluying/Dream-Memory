@@ -306,7 +306,7 @@ class MemoryCliTests(unittest.TestCase):
                     "primary": {
                         "provider": "anthropic",
                         "model": "test-model",
-                        "api_key_env": "ANTHROPIC_API_KEY",
+                        "api_key": "anthropic-key",
                     }
                 },
                 "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
@@ -430,14 +430,13 @@ class MemoryCliTests(unittest.TestCase):
             config_path = Path(tmp) / "config.json"
             config_path.write_text(json.dumps({
                 "models": {
-                    "primary": {"provider": "anthropic", "model": "claude-sonnet-4-6", "api_key_env": "ANTHROPIC_API_KEY"},
-                    "backup": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"},
+                    "primary": {"provider": "anthropic", "model": "claude-sonnet-4-6", "api_key": "anthropic-key"},
+                    "backup": {"provider": "openai", "model": "gpt-4.1", "api_key": "openai-key"},
                 },
                 "model_policy": {"default_profile": "primary", "fallback_chain": ["primary", "backup"]},
             }), encoding="utf-8")
 
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "b"}):
-                exit_code = main(["--config", str(config_path), "check-provider", "--all"])
+            exit_code = main(["--config", str(config_path), "check-provider", "--all"])
 
             self.assertEqual(exit_code, 0)
 
@@ -451,7 +450,7 @@ class MemoryCliTests(unittest.TestCase):
             config_path.write_text(json.dumps({
                 "output_dir": str(output_dir),
                 "models": {
-                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"}
+                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key": "openai-key"}
                 },
                 "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
             }, ensure_ascii=False), encoding="utf-8")
@@ -481,7 +480,7 @@ class MemoryCliTests(unittest.TestCase):
             config_path.write_text(json.dumps({
                 "output_dir": str(memory_dir),
                 "models": {
-                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"}
+                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key": "openai-key"}
                 },
                 "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"], "retry": {"max_attempts": 1}},
             }, ensure_ascii=False), encoding="utf-8")

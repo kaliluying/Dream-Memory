@@ -63,7 +63,7 @@ class MemoryGraphTests(unittest.TestCase):
                 "primary": {
                     "provider": "openai",
                     "model": "gpt-4.1",
-                    "api_key_env": "OPENAI_API_KEY",
+                    "api_key": "openai-key",
                     "timeout_seconds": 45,
                 }
             },

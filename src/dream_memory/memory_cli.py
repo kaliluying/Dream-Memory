@@ -98,9 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     init_config = sub.add_parser("init-config", help="Write a default editable memory config file")
     init_config.add_argument("--output", default=str(DEFAULT_CONFIG_PATH))
 
-    check_provider = sub.add_parser("check-provider", help="Check provider config, API key env, and optionally invoke the model")
+    check_provider = sub.add_parser("check-provider", help="Check provider config, API key, and optionally invoke the model")
     check_provider.add_argument("--provider")
     check_provider.add_argument("--model")
+    check_provider.add_argument("--api-key")
     check_provider.add_argument("--api-key-env")
     check_provider.add_argument("--base-url")
     check_provider.add_argument("--timeout-seconds", type=int)
@@ -126,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     dream.add_argument("--agent", action="store_true", help="Deprecated alias for --mode ai")
     dream.add_argument("--provider")
     dream.add_argument("--model")
+    dream.add_argument("--api-key")
     dream.add_argument("--api-key-env")
     dream.add_argument("--base-url")
     dream.add_argument("--timeout-seconds", type=int)
@@ -163,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--mode", choices=["ai", "rules"])
     pipeline.add_argument("--provider")
     pipeline.add_argument("--model")
+    pipeline.add_argument("--api-key")
     pipeline.add_argument("--api-key-env")
     pipeline.add_argument("--base-url")
     pipeline.add_argument("--timeout-seconds", type=int)
@@ -178,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=["ai", "rules"])
     run.add_argument("--provider")
     run.add_argument("--model")
+    run.add_argument("--api-key")
     run.add_argument("--api-key-env")
     run.add_argument("--base-url")
     run.add_argument("--timeout-seconds", type=int)
@@ -277,10 +281,11 @@ def _runtime_config_from_args(args: argparse.Namespace, config: dict[str, object
     }
     provider_override = getattr(args, "provider", None)
     model_override = getattr(args, "model", None)
-    api_key_override = getattr(args, "api_key_env", None)
+    api_key_override = getattr(args, "api_key", None)
+    api_key_env_override = getattr(args, "api_key_env", None)
     base_url_override = getattr(args, "base_url", None)
     timeout_override = getattr(args, "timeout_seconds", None)
-    if any(value is not None for value in (provider_override, model_override, api_key_override, base_url_override, timeout_override)):
+    if any(value is not None for value in (provider_override, model_override, api_key_override, api_key_env_override, base_url_override, timeout_override)):
         profiles, policy = runtime_parts_from_config(config)
         default_profile = profiles[policy.default_profile].config
         provider = str(_value(provider_override, default_profile.provider))
@@ -293,7 +298,8 @@ def _runtime_config_from_args(args: argparse.Namespace, config: dict[str, object
                 "override": {
                     "provider": provider,
                     "model": model,
-                    "api_key_env": _value(api_key_override, default_profile.api_key_env),
+                    "api_key": _value(api_key_override, default_profile.api_key),
+                    "api_key_env": _value(api_key_env_override, default_profile.api_key_env),
                     "base_url": _value(base_url_override, default_profile.base_url),
                     "timeout_seconds": int(_value(timeout_override, default_profile.timeout_seconds)),
                 }
@@ -509,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
                     provider=profile.config.provider,
                     model=profile.config.model,
                     api_key_env=profile.config.api_key_env,
+                    api_key=profile.config.api_key,
                     base_url=profile.config.base_url,
                     timeout_seconds=profile.config.timeout_seconds,
                     invoke=bool(args.invoke),
@@ -522,9 +529,18 @@ def main(argv: list[str] | None = None) -> int:
         provider = profile.provider
         model = profile.model
         api_key_env = profile.api_key_env
+        api_key = profile.api_key
         base_url = profile.base_url
         timeout_seconds = profile.timeout_seconds
-        payload = provider_diagnostics(provider=provider, model=model, api_key_env=api_key_env, base_url=str(base_url) if base_url else None, timeout_seconds=timeout_seconds, invoke=bool(args.invoke))
+        payload = provider_diagnostics(
+            provider=provider,
+            model=model,
+            api_key_env=api_key_env,
+            api_key=api_key,
+            base_url=str(base_url) if base_url else None,
+            timeout_seconds=timeout_seconds,
+            invoke=bool(args.invoke),
+        )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if payload.get("ok") else 1
 

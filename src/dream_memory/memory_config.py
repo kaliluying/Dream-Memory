@@ -35,7 +35,8 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
         "primary": {
             "provider": "anthropic",
             "model": "claude-sonnet-4-6",
-            "api_key_env": "ANTHROPIC_API_KEY",
+            "api_key": "",
+            "api_key_env": None,
             "base_url": None,
             "timeout_seconds": 60,
         }
@@ -61,6 +62,7 @@ def normalize_memory_config(config: dict[str, Any]) -> dict[str, Any]:
         profile = {
             "provider": value.get("provider"),
             "model": value.get("model"),
+            "api_key": value.get("api_key"),
             "api_key_env": value.get("api_key_env"),
             "base_url": value.get("base_url"),
             "timeout_seconds": value.get("timeout_seconds", 60),
@@ -114,7 +116,7 @@ def load_memory_config(path: Path | str | None = None) -> dict[str, Any]:
         raise ValueError(f"Invalid memory config JSON: {config_path}") from exc
     if not isinstance(loaded, dict):
         raise ValueError(f"Memory config must be a JSON object: {config_path}")
-    if any(key in loaded for key in ("provider", "model", "api_key_env", "base_url", "timeout_seconds")) and "models" not in loaded:
+    if any(key in loaded for key in ("provider", "model", "api_key", "api_key_env", "base_url", "timeout_seconds")) and "models" not in loaded:
         raise ValueError("Memory config no longer supports flat model fields; configure models and model_policy")
     for key, value in loaded.items():
         if key in config:

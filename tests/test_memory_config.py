@@ -23,7 +23,7 @@ class MemoryConfigTests(unittest.TestCase):
                     "primary": {
                         "provider": "openai",
                         "model": "gpt-4.1",
-                        "api_key_env": "OPENAI_API_KEY",
+                        "api_key": "openai-key",
                     }
                 },
                 "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
@@ -34,6 +34,7 @@ class MemoryConfigTests(unittest.TestCase):
 
             self.assertEqual(config["models"]["primary"]["provider"], "openai")
             self.assertEqual(config["models"]["primary"]["model"], "gpt-4.1")
+            self.assertEqual(config["models"]["primary"]["api_key"], "openai-key")
             self.assertFalse(config["invoke_model"])
             self.assertEqual(config["mode"], "ai")
 
@@ -60,12 +61,12 @@ class MemoryConfigTests(unittest.TestCase):
                     "primary": {
                         "provider": "anthropic",
                         "model": "claude-sonnet-4-6",
-                        "api_key_env": "ANTHROPIC_API_KEY",
+                        "api_key": "anthropic-key",
                     },
                     "backup": {
                         "provider": "openai",
                         "model": "gpt-4.1",
-                        "api_key_env": "OPENAI_API_KEY",
+                        "api_key": "openai-key",
                     },
                 },
                 "model_policy": {
@@ -79,6 +80,7 @@ class MemoryConfigTests(unittest.TestCase):
 
             self.assertEqual(config["models"]["primary"]["provider"], "anthropic")
             self.assertEqual(config["models"]["backup"]["provider"], "openai")
+            self.assertEqual(config["models"]["backup"]["api_key"], "openai-key")
             self.assertEqual(config["model_policy"]["default_profile"], "primary")
             self.assertEqual(config["model_policy"]["fallback_chain"], ["primary", "backup"])
             self.assertEqual(config["model_policy"]["retry"]["max_attempts"], 2)
@@ -90,6 +92,7 @@ class MemoryConfigTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
 
             self.assertEqual(payload["models"]["primary"]["model"], DEFAULT_MEMORY_CONFIG["models"]["primary"]["model"])
+            self.assertIn("api_key", payload["models"]["primary"])
             self.assertEqual(payload["model_policy"]["fallback_chain"], ["primary"])
             self.assertIn("output_dir", payload)
 

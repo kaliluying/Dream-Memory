@@ -13,6 +13,7 @@ from dream_memory.model_providers import (
     RetryPolicy,
     StaticModelProvider,
     parse_model_ref,
+    provider_diagnostics,
     runtime_parts_from_config,
 )
 
@@ -25,11 +26,11 @@ class ModelProviderTests(unittest.TestCase):
         self.assertEqual(config.model, "gpt-4.1")
 
     def test_parse_model_ref_uses_explicit_provider(self):
-        config = parse_model_ref("claude-sonnet-4-6", provider="anthropic", api_key_env="MY_KEY")
+        config = parse_model_ref("claude-sonnet-4-6", provider="anthropic", api_key="direct-key")
 
         self.assertEqual(config.provider, "anthropic")
         self.assertEqual(config.model, "claude-sonnet-4-6")
-        self.assertEqual(config.api_key_env, "MY_KEY")
+        self.assertEqual(config.api_key, "direct-key")
 
     def test_static_model_provider_returns_fixed_response(self):
         provider = StaticModelProvider(json.dumps({"candidates": []}))
@@ -57,8 +58,8 @@ class ModelProviderTests(unittest.TestCase):
         profiles, policy = runtime_parts_from_config(
             {
                 "models": {
-                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key_env": "OPENAI_API_KEY"},
-                    "backup": {"provider": "anthropic", "model": "claude-sonnet-4-6", "api_key_env": "ANTHROPIC_API_KEY"},
+                    "primary": {"provider": "openai", "model": "gpt-4.1", "api_key": "openai-key"},
+                    "backup": {"provider": "anthropic", "model": "claude-sonnet-4-6", "api_key": "anthropic-key"},
                 },
                 "model_policy": {
                     "default_profile": "primary",
@@ -69,10 +70,26 @@ class ModelProviderTests(unittest.TestCase):
         )
 
         self.assertEqual(profiles["primary"].config.provider, "openai")
+        self.assertEqual(profiles["primary"].config.api_key, "openai-key")
         self.assertEqual(profiles["backup"].config.model, "claude-sonnet-4-6")
         self.assertEqual(policy.default_profile, "primary")
         self.assertEqual(policy.fallback_chain, ["primary", "backup"])
         self.assertEqual(policy.retry.max_attempts, 2)
+
+    def test_provider_diagnostics_accepts_direct_api_key_without_exposing_secret(self):
+        payload = provider_diagnostics(
+            provider="openai",
+            model="gpt-4.1",
+            api_key="sk-test-secret",
+            api_key_env=None,
+            base_url=None,
+            timeout_seconds=60,
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["api_key_configured"])
+        self.assertTrue(payload["api_key_present"])
+        self.assertNotIn("sk-test-secret", json.dumps(payload))
 
     def test_model_runtime_retries_retryable_http_error_then_succeeds(self):
         attempts = []

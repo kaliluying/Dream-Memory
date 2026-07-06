@@ -2,16 +2,11 @@
 
 默认配置文件：`.dream-memory/config.json`。
 
-`api_key_env` 必须是环境变量名，例如 `OPENAI_API_KEY`，不要把真实 API key 写进配置文件。
-
-```bash
-export OPENAI_API_KEY="..."
-uv run dream-memory check-provider
-```
+主用法是在每个模型 profile 中直接配置 `api_key`。`api_key_env` 仍可作为可选兜底，但默认示例和 `init-config` 都使用 `api_key`。
 
 ## Model Profiles
 
-模型配置必须使用命名 profiles，并显式声明 fallback chain。旧版顶层 `provider/model/api_key_env/base_url/timeout_seconds` 写法不再兼容：
+模型配置必须使用命名 profiles，并显式声明 fallback chain。旧版顶层 `provider/model/api_key/api_key_env/base_url/timeout_seconds` 写法不再兼容：
 
 ```json
 {
@@ -19,14 +14,16 @@ uv run dream-memory check-provider
     "primary": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_key": "your-anthropic-api-key",
+      "api_key_env": null,
       "base_url": null,
       "timeout_seconds": 60
     },
     "openai_backup": {
       "provider": "openai",
       "model": "gpt-4.1",
-      "api_key_env": "OPENAI_API_KEY",
+      "api_key": "your-openai-api-key",
+      "api_key_env": null,
       "base_url": null,
       "timeout_seconds": 45
     }
@@ -63,5 +60,7 @@ uv run dream-memory check-provider
 uv run dream-memory check-provider --all
 uv run dream-memory check-provider --profile primary
 ```
+
+`check-provider` 只输出 `api_key_configured` / `api_key_present`，不会打印明文 key。
 
 持久化 run 会把模型调用事件写入 `.dream-memory/runs/{run_id}/trace.jsonl`，包括 `model_attempt_started`、`model_attempt_failed`、`model_attempt_succeeded`、`model_fallback_used` 和 `model_runtime_failed`。

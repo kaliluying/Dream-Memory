@@ -20,6 +20,7 @@ class ProviderConfig:
     provider: str
     model: str
     api_key_env: str | None = None
+    api_key: str | None = None
     base_url: str | None = None
     timeout_seconds: int = 60
 
@@ -142,7 +143,7 @@ class AnthropicProvider:
         self.config = config
 
     def invoke(self, prompt: str) -> str:
-        api_key = _api_key(self.config.api_key_env or "ANTHROPIC_API_KEY")
+        api_key = _api_key(self.config.api_key, self.config.api_key_env or "ANTHROPIC_API_KEY")
         payload = {
             "model": self.config.model,
             "max_tokens": 4096,
@@ -171,7 +172,7 @@ class OpenAICompatibleProvider:
     def invoke(self, prompt: str) -> str:
         provider = self.config.provider
         default_env = "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
-        api_key = _api_key(self.config.api_key_env or default_env)
+        api_key = _api_key(self.config.api_key, self.config.api_key_env or default_env)
         default_url = "https://openrouter.ai/api/v1/chat/completions" if provider == "openrouter" else "https://api.openai.com/v1/chat/completions"
         payload = {
             "model": self.config.model,
@@ -198,14 +199,22 @@ class OpenAICompatibleProvider:
         return str(data)
 
 
-def parse_model_ref(model_ref: str, *, provider: str | None = None, api_key_env: str | None = None, base_url: str | None = None, timeout_seconds: int = 60) -> ProviderConfig:
+def parse_model_ref(
+    model_ref: str,
+    *,
+    provider: str | None = None,
+    api_key_env: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout_seconds: int = 60,
+) -> ProviderConfig:
     if provider:
         model = model_ref.split(":", 1)[1] if ":" in model_ref and model_ref.split(":", 1)[0] == provider else model_ref
-        return ProviderConfig(provider=provider, model=model, api_key_env=api_key_env, base_url=base_url, timeout_seconds=timeout_seconds)
+        return ProviderConfig(provider=provider, model=model, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
     if ":" in model_ref:
         parsed_provider, parsed_model = model_ref.split(":", 1)
-        return ProviderConfig(provider=parsed_provider, model=parsed_model, api_key_env=api_key_env, base_url=base_url, timeout_seconds=timeout_seconds)
-    return ProviderConfig(provider="anthropic", model=model_ref, api_key_env=api_key_env, base_url=base_url, timeout_seconds=timeout_seconds)
+        return ProviderConfig(provider=parsed_provider, model=parsed_model, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
+    return ProviderConfig(provider="anthropic", model=model_ref, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
 
 
 def build_model_provider(config: ProviderConfig) -> MemoryModelProvider:
@@ -373,6 +382,7 @@ def runtime_parts_from_config(config: dict[str, Any]) -> tuple[dict[str, ModelPr
                 provider=str(value.get("provider") or "anthropic"),
                 model=str(value.get("model") or ""),
                 api_key_env=str(value["api_key_env"]) if value.get("api_key_env") else None,
+                api_key=str(value["api_key"]) if value.get("api_key") else None,
                 base_url=str(value["base_url"]) if value.get("base_url") else None,
                 timeout_seconds=int(value.get("timeout_seconds", 60)),
             ),
@@ -414,16 +424,27 @@ def invoke_model_runtime(
     return (runtime or ModelRuntime()).invoke(prompt, profiles=profiles, policy=policy, trace_callback=trace_callback)
 
 
-def invoke_model(prompt: str, *, model: str, provider: str | None = None, api_key_env: str | None = None, base_url: str | None = None, timeout_seconds: int = 60) -> str:
+def invoke_model(
+    prompt: str,
+    *,
+    model: str,
+    provider: str | None = None,
+    api_key_env: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout_seconds: int = 60,
+) -> str:
     env_api_key = os.environ.get("DEEPAGENT_MEMORY_API_KEY_ENV")
     env_base_url = os.environ.get("DEEPAGENT_MEMORY_BASE_URL")
     env_timeout = os.environ.get("DEEPAGENT_MEMORY_TIMEOUT_SECONDS")
     timeout = int(env_timeout) if env_timeout else timeout_seconds
-    config = parse_model_ref(model, provider=provider, api_key_env=api_key_env or env_api_key, base_url=base_url or env_base_url, timeout_seconds=timeout)
+    config = parse_model_ref(model, provider=provider, api_key_env=api_key_env or env_api_key, api_key=api_key, base_url=base_url or env_base_url, timeout_seconds=timeout)
     return build_model_provider(config).invoke(prompt)
 
 
-def _api_key(env_var: str) -> str:
+def _api_key(api_key: str | None, env_var: str) -> str:
+    if api_key:
+        return api_key
     value = os.environ.get(env_var)
     if not value:
         raise ModelAuthError(f"Missing API key environment variable: {env_var}")
@@ -456,13 +477,25 @@ def looks_like_inline_secret(value: str | None) -> bool:
     return value.startswith("sk-") or value.startswith("sk_") or "api_key=" in lowered or "bearer " in lowered
 
 
-def provider_diagnostics(*, provider: str, model: str, api_key_env: str | None, base_url: str | None, timeout_seconds: int, invoke: bool = False) -> dict[str, Any]:
+def provider_diagnostics(
+    *,
+    provider: str,
+    model: str,
+    api_key_env: str | None,
+    api_key: str | None = None,
+    base_url: str | None,
+    timeout_seconds: int,
+    invoke: bool = False,
+) -> dict[str, Any]:
     inline_secret = looks_like_inline_secret(api_key_env)
-    api_key_present = bool(api_key_env and not inline_secret and os.environ.get(api_key_env))
+    direct_key_present = bool(api_key)
+    env_key_present = bool(api_key_env and not inline_secret and os.environ.get(api_key_env))
+    api_key_present = direct_key_present or env_key_present
     payload: dict[str, Any] = {
         "provider": provider,
         "model": model,
         "api_key_env": api_key_env,
+        "api_key_configured": direct_key_present,
         "api_key_present": api_key_present,
         "api_key_env_looks_like_secret": inline_secret,
         "base_url": base_url,
@@ -471,10 +504,10 @@ def provider_diagnostics(*, provider: str, model: str, api_key_env: str | None, 
         "invoked": False,
     }
     if inline_secret:
-        payload["error"] = "api_key_env must be an environment variable name, not a raw API key"
+        payload["error"] = "api_key_env must be an environment variable name; use api_key for direct keys"
         return payload
     if not api_key_present:
-        payload["error"] = f"missing environment variable: {api_key_env}"
+        payload["error"] = f"missing api_key or environment variable: {api_key_env}"
         return payload
     if invoke:
         try:
@@ -482,6 +515,7 @@ def provider_diagnostics(*, provider: str, model: str, api_key_env: str | None, 
                 'Return JSON only: {"candidates": []}',
                 model=f"{provider}:{model}" if provider and ":" not in model else model,
                 api_key_env=api_key_env,
+                api_key=api_key,
                 base_url=base_url,
                 timeout_seconds=timeout_seconds,
             )
