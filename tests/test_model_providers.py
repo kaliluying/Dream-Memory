@@ -5,6 +5,7 @@ from unittest.mock import patch
 from dream_memory.model_providers import (
     ModelAuthError,
     ModelHTTPError,
+    ModelProviderError,
     ModelProfile,
     ModelPolicy,
     ModelRuntime,
@@ -12,6 +13,9 @@ from dream_memory.model_providers import (
     ProviderConfig,
     RetryPolicy,
     StaticModelProvider,
+    _openai_chat_completions_url,
+    _post_json,
+    _raise_provider_payload_error,
     parse_model_ref,
     provider_diagnostics,
     runtime_parts_from_config,
@@ -125,6 +129,45 @@ class ModelProviderTests(unittest.TestCase):
         config = build.call_args.args[0]
         self.assertEqual(config.provider, "openai")
         self.assertEqual(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free")
+
+    def test_openai_base_url_accepts_root_v1_or_full_endpoint(self):
+        default = "https://api.openai.com/v1/chat/completions"
+
+        self.assertEqual(_openai_chat_completions_url(None, default), default)
+        self.assertEqual(_openai_chat_completions_url("http://localhost:3000", default), "http://localhost:3000/v1/chat/completions")
+        self.assertEqual(_openai_chat_completions_url("http://localhost:3000/v1", default), "http://localhost:3000/v1/chat/completions")
+        self.assertEqual(
+            _openai_chat_completions_url("http://localhost:3000/v1/chat/completions", default),
+            "http://localhost:3000/v1/chat/completions",
+        )
+
+    def test_post_json_reports_non_json_response_with_url_preview(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"<!doctype html><html></html>"
+
+        with patch("urllib.request.urlopen", return_value=Response()):
+            with self.assertRaisesRegex(ModelProviderError, "returned non-JSON response from http://localhost:3000"):
+                _post_json("http://localhost:3000", {}, headers={}, timeout_seconds=1)
+
+    def test_provider_payload_error_raises_for_200_json_error_payload(self):
+        with self.assertRaisesRegex(ModelHTTPError, "Worker local total request limit reached") as raised:
+            _raise_provider_payload_error(
+                {
+                    "error": {
+                        "code": 502,
+                        "message": "Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (92/32)",
+                    }
+                }
+            )
+
+        self.assertEqual(raised.exception.status_code, 502)
 
     def test_model_runtime_retries_retryable_http_error_then_succeeds(self):
         attempts = []

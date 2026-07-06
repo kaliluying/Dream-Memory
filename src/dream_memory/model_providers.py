@@ -161,6 +161,7 @@ class AnthropicProvider:
             },
             timeout_seconds=self.config.timeout_seconds,
         )
+        _raise_provider_payload_error(data)
         content = data.get("content")
         if isinstance(content, list):
             return "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
@@ -182,7 +183,7 @@ class OpenAICompatibleProvider:
             "temperature": 0,
         }
         data = _post_json(
-            self.config.base_url or default_url,
+            _openai_chat_completions_url(self.config.base_url, default_url),
             payload,
             headers={
                 "authorization": f"Bearer {api_key}",
@@ -190,6 +191,7 @@ class OpenAICompatibleProvider:
             },
             timeout_seconds=self.config.timeout_seconds,
         )
+        _raise_provider_payload_error(data)
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             first = choices[0]
@@ -454,6 +456,21 @@ def _api_key(api_key: str | None, env_var: str) -> str:
     return value
 
 
+def _raise_provider_payload_error(data: dict[str, Any]) -> None:
+    error = data.get("error")
+    if not error:
+        return
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = str(error.get("message") or error)
+        try:
+            status_code = int(code)
+        except (TypeError, ValueError):
+            raise ModelProviderError(f"Model provider returned error: {message}")
+        raise ModelHTTPError(status_code, message)
+    raise ModelProviderError(f"Model provider returned error: {error}")
+
+
 def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str], timeout_seconds: int) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -469,7 +486,22 @@ def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str], ti
         raise ModelHTTPError(exc.code, body) from exc
     except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
         raise ModelTimeoutError(f"Model provider timeout: {exc}") from exc
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        preview = raw[:200].replace("\n", "\\n")
+        raise ModelProviderError(f"Model provider returned non-JSON response from {url}: {preview}") from exc
+
+
+def _openai_chat_completions_url(base_url: str | None, default_url: str) -> str:
+    if not base_url:
+        return default_url
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
 
 
 
