@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -325,6 +326,11 @@ def _model_trace_callback(state: dict[str, object] | None):
     return callback
 
 
+def _run_progress(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[dream-memory] {message}", file=sys.stderr, flush=True)
+
+
 def _apply_provider_env(args: argparse.Namespace, config: dict[str, object]) -> None:
     import os
     api_key_env = _value(getattr(args, "api_key_env", None), config.get("api_key_env"))
@@ -345,6 +351,8 @@ def _run_dream_to_review(
     persistent: bool,
     existing_state: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
+    progress = bool(persistent)
+    _run_progress(progress, f"loading events from {args.input}")
     events = load_events_jsonl(Path(args.input))
     output_dir = _configured_output_dir(args, config)
     mode = str(_value(args.mode, config["mode"]))
@@ -352,16 +360,20 @@ def _run_dream_to_review(
     invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
     runtime_config = _runtime_config_from_args(args, config)
     _apply_provider_env(args, config)
+    _run_progress(progress, f"loaded {len(events)} events; mode={mode}; invoke_model={str(invoke_model).lower()}")
     state: dict[str, object] | None = None
     if persistent:
         state = existing_state or create_run_state(memory_dir=output_dir, project=args.project, input_path=str(args.input), mode=mode, model=model, invoke_model=invoke_model)
+        _run_progress(progress, f"created run {state['run_id']} in {state['run_dir']}")
         events_path = copy_input_events(args.input, state)
         state = update_run_state(state, status="running", phase="extracting", artifacts={"events_path": str(events_path)})
         append_trace(state, "events_copied", {"events_path": str(events_path), "event_count": len(events)})
+        _run_progress(progress, f"copied input events to {events_path}")
         working_dir = Path(str(state["run_dir"]))
     else:
         working_dir = output_dir
     if mode == "ai":
+        _run_progress(progress, f"extracting candidates with model {model}")
         extraction = agent_extract_memory_candidates(
             events,
             project=args.project,
@@ -381,17 +393,21 @@ def _run_dream_to_review(
         if state:
             state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
             append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
+            _run_progress(progress, f"model extraction complete; candidates={len(extraction.get('candidates', []))}; dry_run={str(extraction['dry_run']).lower()}")
         result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
         payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path)}
         if "model_runtime" in extraction:
             payload["model_runtime"] = extraction["model_runtime"]
     else:
+        _run_progress(progress, "extracting candidates with rules")
         result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False)
         payload = {**result.to_dict(), "mode": "rules"}
         if state:
             append_trace(state, "rules_extraction_complete", {"candidate_count": result.candidate_count})
+            _run_progress(progress, f"rules extraction complete; candidates={result.candidate_count}")
     candidates = load_events_jsonl(Path(result.candidates_path))
     memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    _run_progress(progress, f"building review queue from {len(candidates)} candidates")
     queue = build_review_queue(candidates, memory_cards)
     queue_path = write_jsonl_records(queue, working_dir / "review_queue.jsonl")
     payload = {**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}
@@ -416,6 +432,8 @@ def _run_dream_to_review(
         write_candidate_traces(state, candidates)
         append_trace(state, "waiting_review", {"review_queue_path": str(queue_path), "review_count": len(queue)})
         payload = {**payload, "run_id": state["run_id"], "run_dir": state["run_dir"], "state_path": str(Path(str(state["run_dir"])) / "state.json")}
+        _run_progress(progress, f"waiting for review; review_count={len(queue)}; run_id={state['run_id']}")
+        _run_progress(progress, f"next: dream-memory resume --run-id {state['run_id']}")
     return payload, state
 
 
