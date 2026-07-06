@@ -21,7 +21,7 @@ from .memory_dreaming import (
     write_jsonl_records,
 )
 from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, write_events_jsonl
-from .model_providers import provider_diagnostics, runtime_parts_from_config
+from .model_providers import SUPPORTED_MODEL_PROVIDERS, provider_diagnostics, runtime_parts_from_config
 from .memory_runs import (
     append_trace,
     copy_input_events,
@@ -292,7 +292,8 @@ def _runtime_config_from_args(args: argparse.Namespace, config: dict[str, object
         model = str(_value(model_override, default_profile.model))
         if ":" in model and provider == default_profile.provider:
             parsed_provider, parsed_model = model.split(":", 1)
-            provider, model = parsed_provider, parsed_model
+            if parsed_provider in SUPPORTED_MODEL_PROVIDERS:
+                provider, model = parsed_provider, parsed_model
         runtime_config = {
             "models": {
                 "override": {

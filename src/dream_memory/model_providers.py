@@ -127,6 +127,8 @@ class ModelRuntimeResult:
 
 TraceCallback = Callable[[str, dict[str, Any]], None]
 
+SUPPORTED_MODEL_PROVIDERS = {"anthropic", "openai", "openrouter"}
+
 
 class StaticModelProvider:
     """Simple test provider returning a fixed response."""
@@ -213,7 +215,8 @@ def parse_model_ref(
         return ProviderConfig(provider=provider, model=model, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
     if ":" in model_ref:
         parsed_provider, parsed_model = model_ref.split(":", 1)
-        return ProviderConfig(provider=parsed_provider, model=parsed_model, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
+        if parsed_provider in SUPPORTED_MODEL_PROVIDERS:
+            return ProviderConfig(provider=parsed_provider, model=parsed_model, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
     return ProviderConfig(provider="anthropic", model=model_ref, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
 
 
@@ -513,7 +516,8 @@ def provider_diagnostics(
         try:
             raw = invoke_model(
                 'Return JSON only: {"candidates": []}',
-                model=f"{provider}:{model}" if provider and ":" not in model else model,
+                provider=provider,
+                model=model,
                 api_key_env=api_key_env,
                 api_key=api_key,
                 base_url=base_url,

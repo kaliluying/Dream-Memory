@@ -25,6 +25,18 @@ class ModelProviderTests(unittest.TestCase):
         self.assertEqual(config.provider, "openai")
         self.assertEqual(config.model, "gpt-4.1")
 
+    def test_parse_model_ref_keeps_colon_model_id_with_explicit_provider(self):
+        config = parse_model_ref("nvidia/nemotron-3-ultra-550b-a55b:free", provider="openai")
+
+        self.assertEqual(config.provider, "openai")
+        self.assertEqual(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free")
+
+    def test_parse_model_ref_only_splits_known_provider_prefixes(self):
+        config = parse_model_ref("nvidia/nemotron-3-ultra-550b-a55b:free")
+
+        self.assertEqual(config.provider, "anthropic")
+        self.assertEqual(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free")
+
     def test_parse_model_ref_uses_explicit_provider(self):
         config = parse_model_ref("claude-sonnet-4-6", provider="anthropic", api_key="direct-key")
 
@@ -90,6 +102,29 @@ class ModelProviderTests(unittest.TestCase):
         self.assertTrue(payload["api_key_configured"])
         self.assertTrue(payload["api_key_present"])
         self.assertNotIn("sk-test-secret", json.dumps(payload))
+
+    def test_provider_diagnostics_invokes_colon_model_with_explicit_provider(self):
+        with patch("dream_memory.model_providers.build_model_provider") as build:
+            class Provider:
+                def invoke(self, prompt):
+                    return '{"candidates":[]}'
+
+            build.return_value = Provider()
+            payload = provider_diagnostics(
+                provider="openai",
+                model="nvidia/nemotron-3-ultra-550b-a55b:free",
+                api_key="sk-test-secret",
+                api_key_env=None,
+                base_url="http://localhost:3000",
+                timeout_seconds=60,
+                invoke=True,
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["invoked"])
+        config = build.call_args.args[0]
+        self.assertEqual(config.provider, "openai")
+        self.assertEqual(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free")
 
     def test_model_runtime_retries_retryable_http_error_then_succeeds(self):
         attempts = []
