@@ -198,6 +198,8 @@ def agent_extract_memory_candidates(
     project: str | None,
     model: Any = "anthropic:claude-sonnet-4-6",
     invoke_model: bool = False,
+    runtime_config: dict[str, Any] | None = None,
+    trace_callback: Any = None,
 ) -> dict[str, Any]:
     if isinstance(model, str):
         from .memory_graph import run_memory_extraction_graph
@@ -207,6 +209,8 @@ def agent_extract_memory_candidates(
             project=project,
             model=model,
             invoke_model=invoke_model,
+            runtime_config=runtime_config,
+            trace_callback=trace_callback,
         )
         payload = {
             "runtime": "langgraph-memory-extraction",
@@ -217,6 +221,8 @@ def agent_extract_memory_candidates(
         }
         if "raw_response" in result:
             payload["raw_response"] = str(result["raw_response"])
+        if "model_runtime" in result:
+            payload["model_runtime"] = dict(result["model_runtime"])
         return payload
 
     prompt = build_memory_extraction_prompt(events, project=project)

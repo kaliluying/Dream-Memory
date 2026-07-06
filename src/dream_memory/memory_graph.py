@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .memory_agent import build_memory_extraction_prompt, extract_json_payload, validate_agent_candidates
 from .model_providers import invoke_model as invoke_model_provider
+from .model_providers import invoke_model_runtime
 
 
 class MemoryExtractionState(TypedDict, total=False):
@@ -17,6 +18,9 @@ class MemoryExtractionState(TypedDict, total=False):
     raw_response: str
     candidates: list[dict[str, Any]]
     dry_run: bool
+    runtime_config: dict[str, Any]
+    model_runtime: dict[str, Any]
+    trace_callback: Any
 
 
 def _build_prompt_node(state: MemoryExtractionState) -> dict[str, Any]:
@@ -32,6 +36,14 @@ def _invoke_model_node(state: MemoryExtractionState) -> dict[str, Any]:
     prompt = str(state.get("prompt") or "")
     if not state.get("invoke_model", False):
         return {"dry_run": True, "candidates": []}
+    runtime_config = state.get("runtime_config")
+    if isinstance(runtime_config, dict):
+        result = invoke_model_runtime(
+            prompt,
+            runtime_config=runtime_config,
+            trace_callback=state.get("trace_callback"),
+        )
+        return {"dry_run": False, "raw_response": result.text, "model_runtime": result.to_dict()}
     raw_response = invoke_model_provider(prompt, model=str(state.get("model") or "anthropic:claude-sonnet-4-6"))
     return {"dry_run": False, "raw_response": raw_response}
 
@@ -62,6 +74,8 @@ def run_memory_extraction_graph(
     project: str | None,
     model: str,
     invoke_model: bool,
+    runtime_config: dict[str, Any] | None = None,
+    trace_callback: Any = None,
 ) -> MemoryExtractionState:
     graph = build_memory_extraction_graph()
     result = graph.invoke({
@@ -69,5 +83,7 @@ def run_memory_extraction_graph(
         "project": project,
         "model": model,
         "invoke_model": invoke_model,
+        "runtime_config": runtime_config,
+        "trace_callback": trace_callback,
     })
     return dict(result)
