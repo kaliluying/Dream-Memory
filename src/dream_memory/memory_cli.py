@@ -162,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_review.add_argument("--keep-review", action="store_true", help="Leave review/needs_more_evidence items undecided instead of writing decisions")
     auto_review.add_argument("--include-duplicates", action="store_true", help="Write rejected decisions for duplicate candidates instead of skipping them")
     auto_review.add_argument("--include-merges", action="store_true", help="Write merged decisions for similar-memory candidates instead of skipping them")
+    auto_review.add_argument("--include-review", action="store_true", help="Also approve 'review' candidates with score >= min-score, not just 'create' ones")
     auto_review.add_argument("--force", action="store_true", help="Overwrite an existing reviewed.jsonl output")
     auto_review.add_argument("--dry-run", action="store_true", help="Preview auto-review decisions and skip reasons without writing reviewed.jsonl or mutating run state")
 
@@ -244,6 +245,22 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--project")
     eval_cmd.add_argument("--mode", choices=["rules", "ai"], default="rules")
     eval_cmd.add_argument("--output")
+
+    sync_cmd = sub.add_parser("sync", help="Import, dream, and optionally auto-apply memory in one step")
+    sync_cmd.add_argument("--project", default=".")
+    sync_cmd.add_argument("--auto", action="store_true", help="Auto-review and apply high-confidence candidates without manual review")
+    sync_cmd.add_argument("--min-score", type=float, default=0.5, dest="min_score", help="Minimum dream_score for auto-approval (default: 0.5)")
+    sync_cmd.add_argument("--output-dir")
+    sync_cmd.add_argument("--memory-cards")
+    sync_cmd.add_argument("--mode", choices=["ai", "rules"])
+    sync_cmd.add_argument("--provider")
+    sync_cmd.add_argument("--model")
+    sync_cmd.add_argument("--api-key")
+    sync_cmd.add_argument("--api-key-env")
+    sync_cmd.add_argument("--base-url")
+    sync_cmd.add_argument("--timeout-seconds", type=int)
+    sync_cmd.set_defaults(invoke_model=True)
+    sync_cmd.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write AI prompt only; do not invoke the model")
 
     return parser
 
@@ -618,6 +635,9 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
             needs_more_evidence += 1
         elif suggested_action in {"create", "merge"} and score < float(args.min_score):
             skip("below_min_score")
+        elif suggested_action == "review" and bool(getattr(args, "include_review", False)) and score >= float(args.min_score):
+            review_action = "approved"
+            approved += 1
         elif suggested_action in {"review", "needs_more_evidence"}:
             skip("requires_manual_review")
         else:
@@ -703,6 +723,130 @@ def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[
     return state
 
 
+def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
+    """Import events, dream candidates, and optionally auto-apply memory in one step."""
+    output_dir = _configured_output_dir(args, config)
+    imports_dir = Path(str(config["imports_output_dir"])).expanduser()
+    project_path = str(getattr(args, "project", None) or ".").strip() or "."
+    auto_mode = bool(getattr(args, "auto", False))
+    min_score = float(getattr(args, "min_score", 0.5))
+
+    # Step 1: import events
+    _run_progress(True, f"importing events (project={project_path})...")
+    codex = CodexImporter(codex_home=Path(str(config["codex_home"])).expanduser())
+    claude = ClaudeCodeImporter(
+        claude_home=Path(str(config["claude_home"])).expanduser(),
+        global_state_path=Path(str(config["claude_state"])).expanduser(),
+        project_roots=[Path(project_path).expanduser()],
+    )
+    codex_events = codex.import_events()
+    claude_events = claude.import_events()
+    events = list(codex_events) + list(claude_events)
+    project_roots = [Path(project_path).expanduser()]
+    project_events = import_project_instruction_events(project_roots)
+    if project_events:
+        events.extend(project_events)
+    project_marker_events = import_project_marker_events(project_roots)
+    if project_marker_events:
+        events.extend(project_marker_events)
+    imports_dir.mkdir(parents=True, exist_ok=True)
+    all_events_path = imports_dir / "all-events.jsonl"
+    write_events_jsonl(events, all_events_path)
+    _run_progress(True, f"imported {len(events)} events")
+
+    if not events:
+        return {"event_count": 0, "status": "no_events", "message": "no events found; nothing to sync"}
+
+    # Step 2: dream (persistent run for better state tracking)
+    dream_args = argparse.Namespace(
+        input=str(all_events_path),
+        project=normalize_project_path(project_path),
+        output_dir=str(output_dir),
+        memory_cards=getattr(args, "memory_cards", None),
+        mode=getattr(args, "mode", None),
+        provider=getattr(args, "provider", None),
+        model=getattr(args, "model", None),
+        api_key=getattr(args, "api_key", None),
+        api_key_env=getattr(args, "api_key_env", None),
+        base_url=getattr(args, "base_url", None),
+        timeout_seconds=getattr(args, "timeout_seconds", None),
+        invoke_model=getattr(args, "invoke_model", True),
+    )
+    payload, state = _run_dream_to_review(args=dream_args, config=config, persistent=True)
+    if not state:
+        return {**payload, "event_count": len(events)}
+
+    run_id = str(state["run_id"])
+    candidate_count = int(payload.get("candidate_count") or 0)
+    _run_progress(True, f"dream complete; run_id={run_id}; candidates={candidate_count}")
+
+    if not auto_mode:
+        return {
+            **payload,
+            "event_count": len(events),
+            "run_id": run_id,
+            "auto": False,
+            "next": f"dream-memory auto-review --run-id {run_id} --min-score {min_score}",
+        }
+
+    # Step 3: auto-review
+    _run_progress(True, f"auto-review with min-score={min_score}...")
+    auto_args = argparse.Namespace(
+        run_id=run_id,
+        output_dir=str(output_dir),
+        reviewer="sync-auto",
+        min_score=min_score,
+        review_queue=None,
+        reviewed_output=None,
+        keep_review=False,
+        include_duplicates=False,
+        include_merges=False,
+        include_review=True,
+        force=True,
+        dry_run=False,
+    )
+    auto_payload = _auto_review_run(args=auto_args, config=config)
+    _run_progress(
+        True,
+        f"auto-review done: approved={auto_payload.get('approved', 0)}, "
+        f"skipped={auto_payload.get('skipped', 0)}, "
+        f"needs_manual={auto_payload.get('needs_more_evidence', 0)}",
+    )
+
+    if auto_payload.get("approved", 0) == 0 and auto_payload.get("needs_more_evidence", 0) == 0:
+        return {
+            "event_count": len(events),
+            "run_id": run_id,
+            "candidate_count": candidate_count,
+            "auto_review": auto_payload,
+            "status": "waiting_review",
+            "message": "no approvable decisions; manual review required",
+        }
+
+    # Step 4: apply
+    _run_progress(True, "applying memory decisions...")
+    resume_args = argparse.Namespace(
+        run_id=run_id,
+        output_dir=str(output_dir),
+        reviewed=None,
+        memory_cards=getattr(args, "memory_cards", None),
+        reviewer="sync-auto",
+    )
+    final_state = _resume_run(args=resume_args, config=config)
+    counts = final_state.get("counts", {}) if isinstance(final_state.get("counts"), dict) else {}
+    memory_count = counts.get("memory_count") or counts.get("review_decision_count")
+    _run_progress(True, f"sync complete; memory_count={memory_count}")
+
+    return {
+        "event_count": len(events),
+        "run_id": run_id,
+        "candidate_count": candidate_count,
+        "auto_review": auto_payload,
+        "memory_count": memory_count,
+        "status": "completed",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_memory_config(args.config)
@@ -761,6 +905,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if payload.get("ok") else 1
+
+    if args.command == "sync":
+        payload = _handle_sync(args=args, config=config)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "eval":
         payload = evaluate_labeled_events(args.input, project=args.project, mode=args.mode)

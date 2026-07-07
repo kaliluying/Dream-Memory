@@ -22,7 +22,30 @@ ONE_OFF_MEMORY_RE = re.compile(
     re.I,
 )
 LOW_VALUE_EVENT_RE = re.compile(
-    r"^(Exit code|Traceback|File created successfully|WARNING:|Task #\d+ created successfully|Using [a-z0-9:_-]+ to |[-dlrwxs]{10}\s+\d+\s+|我需要先|我需要查看|我需要继续|让我|好的[，,]|现在开始|已开始并行生成|generated_bills_|你好！有什么需要我帮忙的吗|我理解您想)",
+    r"^(Exit code|Traceback|File created successfully|File does not exist"
+    r"|The file .+ has been (updated|created|deleted) successfully"
+    r"|Note: your current working directory|WARNING:|Task #\d+ created successfully"
+    r"|Using [a-z0-9:_-]+ to |[-dlrwxs]{10}\s+\d+\s+"
+    r"|我需要先|我需要查看|我需要继续|让我|好的[，,]|现在开始|已开始并行生成"
+    r"|generated_bills_|你好！有什么需要我帮忙的吗|我理解您想"
+    r"|Fichier créé avec succès|Le fichier .+ a été mis à jour"
+    r"|remotes/origin/|  remotes/|origin/HEAD ->"
+    r"|<system.?reminder|<system_reminder|<image name=|<tool_use_error"
+    r"|\d+\tINFO:\s+|\d+\tWARNING:\s+|\d+\tERROR:\s+"
+    r"|Async agent launched successfully\. agentId:"
+    r"|Commande s.ex.cutant en arri.re-plan avec"
+    r"|Already on '|Switched to (a new )?branch"
+    r"|Handles\s+NPM\(K\)\s+PM\(K\)"
+    r"|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \| (INFO|WARNING|ERROR|DEBUG)\s+\|"
+    r"|HTTP/1\.[01]\" [1-5]\d{2}"
+    r"|Initialized empty Git repository"
+    r"|^Python \d+\.\d+\.\d+"
+    r"|^(uv|pip|npm|node|cargo|go|rustc|java|mvn) \d+\.\d+"
+    r"|^fatal: (not a git|couldn't|unable to|ambiguous)"
+    r"|^(ls|cat|sh|bash): (cannot|can't|No such)"
+    r"|^Ŀ¼:|^目录:|^LastWriteTime\s+Length"
+    r"|^\[dream-memory\]"
+    r")",
     re.I,
 )
 TASK_BRIEF_RE = re.compile(r"^\s*\d+\.\s*TASK:", re.I)
@@ -439,9 +462,176 @@ def _is_low_value_event_content(content: str) -> bool:
         return True
     if "## My request for Codex:" in content and content.startswith("#"):
         return True
+    # 工具成功/失败输出
+    if re.search(r"has been (updated|created|deleted|written) successfully", content, re.I):
+        return True
+    if re.search(r"^(File|Directory) (does not exist|not found|already exists)", content, re.I):
+        return True
+    if re.search(r"^\s*\(file state is current", content, re.I):
+        return True
+    if re.search(r"^Bash tool|^PowerShell tool|^Read tool|^Edit tool|^Write tool|^Glob tool|^Grep tool", content, re.I):
+        return True
+    # runtime system messages that appear anywhere in content
+    if "Async agent launched successfully" in content:
+        return True
+    # 后台命令消息（英文和法语版本）
+    # Background command messages (English and French)
+    if "Output is being written to:" in content:
+        if "running in background with ID:" in content or "en arrière-plan avec" in content:
+            return True
+    if "Web search results for query:" in content:
+        return True
+    # ANSI 转义码（日志彩色输出）
+    # ANSI escape codes in log output
+    if "\x1b[" in content:
+        return True
+    # numbered-line prefixed content (Read tool output)
+    if re.match(r"^\d+\t", content) and content.count("\t") >= 3:
+        return True
+    # pure JSON structures (config dumps, API responses)
+    stripped_c = content.strip()
+    if len(stripped_c) > 50 and (
+        (stripped_c.startswith("{") and stripped_c.endswith("}"))
+        or (stripped_c.startswith("[") and stripped_c.endswith("]"))
+    ):
+        try:
+            json.loads(stripped_c)
+            return True
+        except Exception:
+            pass
+    # Windows directory listing header
+    if re.match(r"^(Mode\s+LastWriteTime\s+Length|Directory of )", content, re.I):
+        return True
+    # garbled encoding: many U+FFFD replacement characters
+    if content.count("\ufffd") > 3:
+        return True
+    # git branch listing (output of git branch -a)
+    if re.match(r"^[*+ ] ", content) and "remotes/" in content:
+        return True
+    # single bare path line
+    stripped_c2 = content.strip()
+    if (
+        re.match(r"^([a-zA-Z]:[/\\]|/[a-z]|/[cd]/)[^\n]{5,80}$", stripped_c2)
+        and "\n" not in stripped_c2
+    ):
+        return True
+    # Python sys.path list or ModuleSpec
+    if re.match(r"^\['?'?,? ?'?[a-zA-Z]:", content) or re.match(r"^ModuleSpec\(name=", content):
+        return True
+    # git status modified-file lines
+    if re.match(r"^[MADRCU?!]{1,2}\s+(backend|frontend|src|tests|app)/", content):
+        return True
+    # multi-line path list (60%+ are path lines)
+    lines_c = [l.strip() for l in content.splitlines() if l.strip()]
+    if lines_c and len(lines_c) >= 2:
+        path_lines = sum(
+            1 for l in lines_c
+            if re.match(r"^([a-zA-Z]:[/\\]|/[a-z]|/[cd]/|\.worktrees|\.venv)", l)
+        )
+        if path_lines / len(lines_c) > 0.6:
+            return True
     if TRANSIENT_QUESTION_RE.search(content) and not any(token in content for token in ["记住", "始终", "偏好", "必须"]):
         return True
+    # <system_reminder> blocks (localized tags)
+    if re.match(r"^<system[_-]?reminder", content, re.I):
+        return True
+    # dream-memory CLI progress messages captured as events
+    if re.match(r"^\[dream-memory\]", content):
+        return True
+    # <image name= blocks (codex clipboard / screenshot paths inside content)
+    if re.search(r"<image name=\[Image #\d+\]", content):
+        return True
+    # database migration / alembic output
+    if re.search(r"(alembic_version|Table .+ already exists|alembic upgrade)", content, re.I):
+        return True
+    # debug session output (key=value lines from our own debug scripts)
+    if re.match(r"^has [a-z _]+: (True|False)\r?\n", content):
+        return True
+    # relative path lists (./foo/bar.py style, 2+ lines, 60%+ are path lines)
+    if lines_c and len(lines_c) >= 2:
+        rel_path_lines = sum(1 for l in lines_c if re.match(r"^\./[\w/._-]+\.(py|ts|js|go|rs|md|json|yaml|yml)$", l))
+        if rel_path_lines / len(lines_c) > 0.6:
+            return True
+    # deep venv / worktrees site-packages paths
+    if re.match(r"^\.worktrees[\\/]|.*site-packages[\\/]", stripped_c2, re.I):
+        return True
+    # pip install command history (grep output)
+    if re.search(r"^\d+:pip install\b", content, re.M) and content.count("pip install") >= 2:
+        return True
+    # ls -la style output block (multiple rwx lines)
+    rwx_lines = sum(1 for l in (lines_c or []) if re.match(r"^-?[dlrwxs-]{9}", l))
+    if rwx_lines >= 2:
+        return True
+    # grep output: path:line_num:content pattern (2+ lines)
+    grep_lines = sum(1 for l in (lines_c or []) if re.match(r"^[^\s:]+\.(py|ts|js|vue|go|rs|java):\d+:", l))
+    if grep_lines >= 2:
+        return True
+    # git stash message
+    if re.match(r"^Saved working directory and index state", content):
+        return True
+    # PowerShell Get-ChildItem header
+    if re.match(r"^Path\s*\r?\n-+", content) or re.match(r"^\s*Path\s+LastWriteTime", content, re.I):
+        return True
+    # branch name lists (multiple feature/worktree/codex lines)
+    branch_lines = sum(1 for l in (lines_c or []) if re.match(r"^(feature/|worktree-|codex/|hotfix/|bugfix/|release/)", l))
+    if lines_c and len(lines_c) >= 2 and branch_lines / len(lines_c) > 0.6:
+        return True
+    # bare URL lines with no surrounding context
+    if re.match(r"^https?://[^\s]+$", stripped_c2) and "\n" not in stripped_c2:
+        return True
+    # GBK/GB2312 mojibake: dense non-CJK-range bytes mixed with latin
+    mojibake_count = len(re.findall(r"[\x80-\xbf]", content.encode("latin-1", errors="replace").decode("latin-1")))
+    if mojibake_count > 8:
+        return True
+    # storage/snapshot path lists (app internal storage structure)
+    if re.match(r"^storage[\\/](snapshots|repair_requests|runs)[\\/]", stripped_c2):
+        return True
+    # single-line grep output (file:line:content, not multi-line); search (not match)
+    # so Windows drive-letter paths (D:\...) don't break the anchor
+    if re.search(r"[^\s:]+\.(py|ts|js|vue|go|rs|java):\d+:\s+\S", stripped_c2) and "\n" not in stripped_c2:
+        return True
+    # content too short to be a memory (< 12 chars after strip)
+    if len(stripped_c2) < 12:
+        return True
+    # IDE auto-notification (file opened in editor)
+    if "<ide_opened_file>" in content or "<ide_selection>" in content:
+        return True
+    # python interpreter crash / cannot open file
+    if re.search(r"python\.exe: can't open file", content, re.I):
+        return True
+    # loguru-style log line anywhere in content (not just at start)
+    if re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \| (INFO|WARNING|ERROR|DEBUG)\s+\|", content):
+        return True
+    # ad-hoc test/verification script header + interpreter version dump
+    if re.search(r"={3,}\s*(验证|测试).{0,10}={3,}", content) and re.search(r"Python\s*(版本|version)?\s*[:：]?\s*3\.\d+", content, re.I):
+        return True
+    # script progress output: "正在移动/复制/处理 N 张/个/条 ... 到/文件夹"
+    if re.search(r"正在(移动|复制|处理)\s*\d+\s*(张|个|条).{0,20}(文件夹|到)", content):
+        return True
+    # shell cwd reset notice (appears standalone or appended to other tool output)
+    if "Shell cwd was reset to" in content:
+        return True
+    # find/grep "no such file or directory" tool errors
+    if re.search(r"^(find|grep):\s.+No such file or directory", content, re.I):
+        return True
+    # bare file path with no explanatory sentence (single or few lines, no CJK/sentence content)
+    if lines_c and 1 <= len(lines_c) <= 3:
+        path_only_lines = sum(
+            1 for l in lines_c
+            if re.match(r"^([a-zA-Z]:[\\/]|/[a-z]|\./|\.\./)[^\s]*$", l)
+        )
+        if path_only_lines == len(lines_c):
+            return True
+    # simple confirmation messages ("uv.lock 已找到" style, no explanation)
+    if re.match(r"^[\w.\-]+\s*[\r\n]+\s*(✅|❌)\s*", content):
+        return True
+    # tsc/typescript compiler error output
+    if re.search(r"error TS\d+:", content):
+        return True
     return False
+
+
+
 
 
 
@@ -702,7 +892,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 tags=["requirement"],
             ))
 
-        if any(token in lowered for token in ["uv", "python", "claude code", "codex", "dream", "runtime", "patch"]):
+        if any(token in lowered for token in ["uv", "python", "claude code", "codex", "dream", "runtime", "patch"]) and not _is_low_value_event_content(content):
             tags = [
                 tag for tag, needle in [
                     ("uv", "uv"),
@@ -846,7 +1036,7 @@ def build_candidates_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, A
         if fact.get("fact_type") == "system_state" or "project_state" in fact.get("tags", []):
             continue
         content = str(fact.get("statement") or "").strip()
-        if not content or SENSITIVE_RE.search(content) or _is_raw_transcript_like(content):
+        if not content or SENSITIVE_RE.search(content) or _is_raw_transcript_like(content) or _is_low_value_event_content(content):
             continue
         scope = str(fact.get("scope") or "global")
         project = normalize_project_path(str(fact.get("project"))) if fact.get("project") else None
