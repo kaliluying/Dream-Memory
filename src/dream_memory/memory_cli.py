@@ -21,7 +21,7 @@ from .memory_dreaming import (
     load_events_jsonl,
     write_jsonl_records,
 )
-from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, write_events_jsonl
+from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, import_project_instruction_events, import_project_marker_events, write_events_jsonl
 from .model_providers import SUPPORTED_MODEL_PROVIDERS, provider_diagnostics, runtime_parts_from_config
 from .memory_runs import (
     append_trace,
@@ -36,7 +36,8 @@ from .memory_runs import (
 
 
 def _default_project_roots(values: list[str] | None) -> list[Path]:
-    return [Path(value).expanduser() for value in values or []]
+    roots = [Path(value).expanduser() for value in values or []]
+    return roots or [Path.cwd()]
 
 
 def _init_workspace(path: Path | str, *, force: bool = False) -> dict[str, object]:
@@ -145,6 +146,24 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--candidates", required=True)
     review.add_argument("--memory-cards")
     review.add_argument("--output-dir")
+
+    review_summary = sub.add_parser("review-summary", help="Summarize a review queue by action, type, quality, and score")
+    review_summary.add_argument("--run-id", help="Run ID whose review_queue.jsonl should be summarized")
+    review_summary.add_argument("--review-queue", help="Explicit review_queue.jsonl path")
+    review_summary.add_argument("--output-dir")
+
+    auto_review = sub.add_parser("auto-review", help="Write reviewed decisions for high-confidence run candidates")
+    auto_review.add_argument("--run-id", required=True)
+    auto_review.add_argument("--output-dir")
+    auto_review.add_argument("--reviewer", default="auto-review")
+    auto_review.add_argument("--min-score", type=float, default=0.7, help="Minimum dream_score for auto-approval")
+    auto_review.add_argument("--review-queue", help="Override review_queue.jsonl path")
+    auto_review.add_argument("--reviewed-output", help="Override reviewed.jsonl output path")
+    auto_review.add_argument("--keep-review", action="store_true", help="Leave review/needs_more_evidence items undecided instead of writing decisions")
+    auto_review.add_argument("--include-duplicates", action="store_true", help="Write rejected decisions for duplicate candidates instead of skipping them")
+    auto_review.add_argument("--include-merges", action="store_true", help="Write merged decisions for similar-memory candidates instead of skipping them")
+    auto_review.add_argument("--force", action="store_true", help="Overwrite an existing reviewed.jsonl output")
+    auto_review.add_argument("--dry-run", action="store_true", help="Preview auto-review decisions and skip reasons without writing reviewed.jsonl or mutating run state")
 
     apply_cmd = sub.add_parser("apply", help="Apply reviewed memory decisions")
     apply_cmd.add_argument("--reviewed", required=True)
@@ -373,45 +392,58 @@ def _run_dream_to_review(
         working_dir = Path(str(state["run_dir"]))
     else:
         working_dir = output_dir
-    if mode == "ai":
-        _run_progress(progress, f"extracting candidates with model {model}")
-        extraction = agent_extract_memory_candidates(
-            events,
-            project=args.project,
-            model=model,
-            invoke_model=invoke_model,
-            runtime_config=runtime_config,
-            trace_callback=_model_trace_callback(state),
-        )
-        working_dir.mkdir(parents=True, exist_ok=True)
-        prompt_path = working_dir / "ai-prompt.md"
-        prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
-        artifacts = {"ai_prompt_path": str(prompt_path)}
-        if "raw_response" in extraction:
-            raw_path = working_dir / "ai-raw-response.txt"
-            raw_path.write_text(str(extraction["raw_response"]), encoding="utf-8")
-            artifacts["ai_raw_response_path"] = str(raw_path)
+    try:
+        if mode == "ai":
+            _run_progress(progress, f"extracting candidates with model {model}")
+            extraction = agent_extract_memory_candidates(
+                events,
+                project=args.project,
+                model=model,
+                invoke_model=invoke_model,
+                runtime_config=runtime_config,
+                trace_callback=_model_trace_callback(state),
+            )
+            working_dir.mkdir(parents=True, exist_ok=True)
+            prompt_path = working_dir / "ai-prompt.md"
+            prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
+            artifacts = {"ai_prompt_path": str(prompt_path)}
+            if "raw_response" in extraction:
+                raw_path = working_dir / "ai-raw-response.txt"
+                raw_path.write_text(str(extraction["raw_response"]), encoding="utf-8")
+                artifacts["ai_raw_response_path"] = str(raw_path)
+            if state:
+                state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
+                append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
+                _run_progress(progress, f"model extraction complete; candidates={len(extraction.get('candidates', []))}; dry_run={str(extraction['dry_run']).lower()}")
+            result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
+            payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path)}
+            if "model_runtime" in extraction:
+                payload["model_runtime"] = extraction["model_runtime"]
+        else:
+            _run_progress(progress, "extracting candidates with rules")
+            result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False)
+            payload = {**result.to_dict(), "mode": "rules"}
+            if state:
+                append_trace(state, "rules_extraction_complete", {"candidate_count": result.candidate_count})
+                _run_progress(progress, f"rules extraction complete; candidates={result.candidate_count}")
+        candidates = load_events_jsonl(Path(result.candidates_path))
+        memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+        _run_progress(progress, f"building review queue from {len(candidates)} candidates")
+        queue = build_review_queue(candidates, memory_cards)
+        queue_path = write_jsonl_records(queue, working_dir / "review_queue.jsonl")
+        payload = {**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}
+    except Exception as exc:
         if state:
-            state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
-            append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
-            _run_progress(progress, f"model extraction complete; candidates={len(extraction.get('candidates', []))}; dry_run={str(extraction['dry_run']).lower()}")
-        result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
-        payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path)}
-        if "model_runtime" in extraction:
-            payload["model_runtime"] = extraction["model_runtime"]
-    else:
-        _run_progress(progress, "extracting candidates with rules")
-        result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False)
-        payload = {**result.to_dict(), "mode": "rules"}
-        if state:
-            append_trace(state, "rules_extraction_complete", {"candidate_count": result.candidate_count})
-            _run_progress(progress, f"rules extraction complete; candidates={result.candidate_count}")
-    candidates = load_events_jsonl(Path(result.candidates_path))
-    memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
-    _run_progress(progress, f"building review queue from {len(candidates)} candidates")
-    queue = build_review_queue(candidates, memory_cards)
-    queue_path = write_jsonl_records(queue, working_dir / "review_queue.jsonl")
-    payload = {**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}
+            failed_state = update_run_state(
+                state,
+                status="failed",
+                phase="failed",
+                error=f"{exc.__class__.__name__}: {exc}",
+                next_actions=["inspect trace", "fix provider/config and rerun"],
+            )
+            append_trace(failed_state, "run_failed", {"error_type": exc.__class__.__name__, "error": str(exc)})
+            _run_progress(progress, f"run failed: {exc.__class__.__name__}: {exc}")
+        raise
     if state:
         state = update_run_state(
             state,
@@ -460,6 +492,172 @@ def _export_memory(*, args: argparse.Namespace, config: dict[str, object]) -> di
         target = output_dir / "CLAUDE.md" if args.scope == "project" else Path.home() / ".claude" / "CLAUDE.md"
         written.append(str(write_marked_file(target, markdown, heading="## Dream Memory Context")))
     return {"target": args.target, "scope": args.scope, "project": context.get("project"), "written": written, "count": context.get("count")}
+
+
+def _summarize_review_queue(queue: list[dict[str, object]]) -> dict[str, object]:
+    def bump(bucket: dict[str, int], key: object) -> None:
+        name = str(key or "unknown")
+        bucket[name] = bucket.get(name, 0) + 1
+
+    by_status: dict[str, int] = {}
+    by_suggested_action: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    by_scope: dict[str, int] = {}
+    by_evidence_quality: dict[str, int] = {}
+    duplicate_count = 0
+    conflict_count = 0
+    low_score_count = 0
+    needs_manual_count = 0
+    scores: list[float] = []
+    for item in queue:
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
+        quality = item.get("quality_signals") if isinstance(item.get("quality_signals"), dict) else {}
+        action = str(item.get("suggested_action") or analysis.get("suggested_action") or "unknown")
+        bump(by_status, item.get("status") or candidate.get("status"))
+        bump(by_suggested_action, action)
+        bump(by_type, candidate.get("type"))
+        bump(by_scope, candidate.get("scope"))
+        bump(by_evidence_quality, quality.get("evidence_quality"))
+        duplicate_count += 1 if quality.get("duplicate") else 0
+        conflict_count += len(item.get("conflicts") or []) if isinstance(item.get("conflicts"), list) else 0
+        needs_manual_count += 1 if action in {"review", "needs_more_evidence"} else 0
+        try:
+            score = max(0.0, min(1.0, float(analysis.get("dream_score", 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            score = 0.0
+        scores.append(score)
+        if action in {"create", "merge"} and score < 0.7:
+            low_score_count += 1
+    return {
+        "total": len([item for item in queue if isinstance(item, dict)]),
+        "by_status": dict(sorted(by_status.items())),
+        "by_suggested_action": dict(sorted(by_suggested_action.items())),
+        "by_type": dict(sorted(by_type.items())),
+        "by_scope": dict(sorted(by_scope.items())),
+        "by_evidence_quality": dict(sorted(by_evidence_quality.items())),
+        "duplicate_count": duplicate_count,
+        "conflict_count": conflict_count,
+        "low_score_count": low_score_count,
+        "needs_manual_count": needs_manual_count,
+        "score_min": round(min(scores), 4) if scores else None,
+        "score_max": round(max(scores), 4) if scores else None,
+        "score_avg": round(sum(scores) / len(scores), 4) if scores else None,
+    }
+
+
+def _dream_score(item: dict[str, object]) -> float:
+    analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
+    try:
+        return max(0.0, min(1.0, float(analysis.get("dream_score", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
+    output_dir = _configured_output_dir(args, config)
+    state = load_run_state(output_dir, args.run_id)
+    artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
+    queue_path = Path(str(args.review_queue or artifacts.get("review_queue_path") or "")).expanduser()
+    if not queue_path.exists():
+        raise FileNotFoundError(f"review queue not found for run {args.run_id}: {queue_path}")
+    queue = load_events_jsonl(queue_path)
+    reviewed_path = Path(str(args.reviewed_output or Path(str(state["run_dir"])) / "reviewed.jsonl")).expanduser()
+    dry_run = bool(getattr(args, "dry_run", False))
+    if reviewed_path.exists() and not dry_run and not bool(getattr(args, "force", False)):
+        raise FileExistsError(f"reviewed output already exists; pass --force to overwrite: {reviewed_path}")
+    decisions: list[dict[str, object]] = []
+    skipped = 0
+    approved = 0
+    rejected = 0
+    needs_more_evidence = 0
+    duplicate_skipped = 0
+    merge_skipped = 0
+    skip_reasons: dict[str, int] = {}
+
+    def skip(reason: str) -> None:
+        nonlocal skipped
+        skipped += 1
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
+    for item in queue:
+        if not isinstance(item, dict):
+            skip("malformed_item")
+            continue
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        if not candidate:
+            skip("missing_candidate")
+            continue
+        quality_signals = item.get("quality_signals") if isinstance(item.get("quality_signals"), dict) else {}
+        if quality_signals.get("duplicate") and not bool(getattr(args, "include_duplicates", False)):
+            skip("duplicate")
+            duplicate_skipped += 1
+            continue
+        analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
+        suggested_action = str(item.get("suggested_action") or analysis.get("suggested_action") or "review")
+        score = _dream_score(item)
+        review_action: str | None = None
+        if suggested_action == "create" and score >= float(args.min_score):
+            review_action = "approved"
+            approved += 1
+        elif suggested_action == "merge" and score >= float(args.min_score):
+            if bool(getattr(args, "include_merges", False)):
+                review_action = "merged"
+                approved += 1
+            else:
+                skip("merge_requires_explicit_include")
+                merge_skipped += 1
+                continue
+        elif suggested_action == "reject":
+            review_action = "rejected"
+            rejected += 1
+        elif not args.keep_review and suggested_action == "needs_more_evidence":
+            review_action = "needs_more_evidence"
+            needs_more_evidence += 1
+        elif suggested_action in {"create", "merge"} and score < float(args.min_score):
+            skip("below_min_score")
+        elif suggested_action in {"review", "needs_more_evidence"}:
+            skip("requires_manual_review")
+        else:
+            skip("unhandled_action")
+        if review_action is None:
+            continue
+        decisions.append({
+            "candidate_id": candidate.get("id") or item.get("candidate_id"),
+            "action": review_action,
+            "edited_content": candidate.get("content"),
+            "reviewer": str(args.reviewer or "auto-review"),
+            "candidate": candidate,
+            "review_note": f"Auto-review from suggested_action={suggested_action}, dream_score={score:.3f}.",
+        })
+    payload = {
+        "run_id": state["run_id"],
+        "reviewed_path": str(reviewed_path),
+        "decision_count": len(decisions),
+        "approved": approved,
+        "rejected": rejected,
+        "needs_more_evidence": needs_more_evidence,
+        "skipped": skipped,
+        "duplicate_skipped": duplicate_skipped,
+        "merge_skipped": merge_skipped,
+        "skip_reasons": dict(sorted(skip_reasons.items())),
+        "min_score": float(args.min_score),
+        "dry_run": dry_run,
+    }
+    if dry_run:
+        return payload
+    reviewed_path.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl_records(decisions, reviewed_path)
+    state = update_run_state(
+        state,
+        artifacts={"reviewed_path": str(reviewed_path)},
+        counts={"auto_review_count": len(decisions)},
+        next_actions=[f"dream-memory resume --run-id {state['run_id']}", "inspect reviewed decisions"],
+    )
+    append_trace(state, "auto_reviewed", payload)
+    return payload
 
 
 def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
@@ -605,6 +803,30 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"review_count": len(queue), "review_queue_path": str(queue_path)}, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "review-summary":
+        output_dir = _configured_output_dir(args, config)
+        if args.review_queue:
+            queue_path = Path(args.review_queue).expanduser()
+        elif args.run_id:
+            state = load_run_state(output_dir, args.run_id)
+            artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
+            queue_path = Path(str(artifacts.get("review_queue_path") or "")).expanduser()
+        else:
+            raise ValueError("review-summary requires --run-id or --review-queue")
+        if not queue_path.exists():
+            raise FileNotFoundError(f"review queue not found: {queue_path}")
+        queue = load_events_jsonl(queue_path)
+        payload = {"review_queue_path": str(queue_path), **_summarize_review_queue(queue)}
+        if args.run_id:
+            payload["run_id"] = args.run_id
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "auto-review":
+        payload = _auto_review_run(args=args, config=config)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "apply":
         reviewed = load_events_jsonl(Path(args.reviewed))
         existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
@@ -722,6 +944,15 @@ def main(argv: list[str] | None = None) -> int:
         claude_events = claude.import_events()
         events.extend(claude_events)
         written_files.append(str(write_events_jsonl(claude_events, output_dir / "claude-events.jsonl")))
+    project_roots = _default_project_roots(args.project)
+    project_events = import_project_instruction_events(project_roots)
+    if project_events:
+        events.extend(project_events)
+        written_files.append(str(write_events_jsonl(project_events, output_dir / "project-instructions-events.jsonl")))
+    project_marker_events = import_project_marker_events(project_roots)
+    if project_marker_events:
+        events.extend(project_marker_events)
+        written_files.append(str(write_events_jsonl(project_marker_events, output_dir / "project-marker-events.jsonl")))
     combined_name = f"{args.source}-events.jsonl"
     written_files.append(str(write_events_jsonl(events, output_dir / combined_name)))
     _write_report(output_dir, {

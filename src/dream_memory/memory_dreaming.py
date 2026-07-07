@@ -21,6 +21,18 @@ ONE_OFF_MEMORY_RE = re.compile(
     r"(删除|修改|改为|改成|实现|新增|接入|修复|清理|迁移|跑|测试|生成).{0,24}(页面|组件|按钮|接口|脚本|水印|首页|配置|任务|数据)",
     re.I,
 )
+LOW_VALUE_EVENT_RE = re.compile(
+    r"^(Exit code|Traceback|File created successfully|WARNING:|Task #\d+ created successfully|Using [a-z0-9:_-]+ to |[-dlrwxs]{10}\s+\d+\s+|我需要先|我需要查看|我需要继续|让我|好的[，,]|现在开始|已开始并行生成|generated_bills_|你好！有什么需要我帮忙的吗|我理解您想)",
+    re.I,
+)
+TASK_BRIEF_RE = re.compile(r"^\s*\d+\.\s*TASK:", re.I)
+SHORT_ONE_OFF_RE = re.compile(r"(不需要|不要|改成|改为|名字|箭头|图片|模板|脚本|字体|生成|重新生成|多久|侧边栏|样式|快麦|最近爬去|六角|星号|摄像头|openclaw)", re.I)
+TRANSIENT_QUESTION_RE = re.compile(r"(怎么|如何|哪里|多久|需不需要|要不要|该怎么办|是什么|吗[？?]?$|为什么|能不能|可不可以|是否)")
+CODE_DUMP_RE = re.compile(r"(^|\n)\s*\d+\s*\t\s*(from|import|class|def|if|for|while|return|#|//|const|let|function|<template>)\b", re.I)
+DIRECTORY_DUMP_RE = re.compile(r"(^|\n)={3,}[^\n]{0,80}={3,}($|\n)")
+MEMORY_PRODUCT_DIRECTION_RE = re.compile(r"(整理|导入|提取).{0,24}(claude code|codex|会话|聊天).{0,40}(记忆|memory|agent)", re.I)
+MEMORY_REVIEW_GATE_RE = re.compile(r"(人工审核|审核).{0,18}(写入|落|正式).{0,12}(记忆|memory)|只有通过.{0,12}(写入|落).{0,12}(记忆|memory)", re.I)
+AUTONOMY_PREFERENCE_RE = re.compile(r"(不需要|不用).{0,10}(再)?问我|按照你的建议|你来决定|你决定|直接做|你推荐", re.I)
 DEFAULT_DREAM_PROMOTION_POLICY: dict[str, Any] = {
     "promote_threshold": 0.7,
     "review_threshold": 0.45,
@@ -30,6 +42,18 @@ DEFAULT_DREAM_PROMOTION_POLICY: dict[str, Any] = {
     "conflict_promote_action": "merge",
 }
 ACTION_ORDER = ["create", "merge", "needs_more_evidence", "review", "reject"]
+TASK_INTENT_ALIASES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    (("提交", "推送", "拉取", "分支", "版本号", "commit", "push", "branch"), ("git", "repo-maintenance", "commit", "push", "branch", "仓库维护", "提交", "推送", "分支")),
+    (("梳理", "审查", "分析", "可行性", "看看", "review"), ("repo-inspection", "code-grounded", "analysis", "真实仓库", "梳理", "审查", "分析")),
+    (("继续", "下一步", "开始", "做"), ("continuation", "execution-style", "继续", "下一步", "已确认计划")),
+    (("agent", "协作", "几个人", "并行"), ("agent-team", "task-planning", "协作", "并行")),
+    (("中文", "语言"), ("language", "chinese", "中文")),
+    (("不需要再问", "不用问", "按照你的建议", "直接推进", "直接做", "你决定", "你推荐"), ("autonomy", "direct-execution", "直接推进", "不要反复询问", "判断直接推进")),
+    (("人工审核", "审核", "正式记忆", "写入记忆", "长期记忆"), ("review-gate", "memory-safety", "人工审核", "正式记忆", "长期记忆")),
+    (("测试", "跑测试", "验证", "单测", "pytest", "unittest", "test"), ("testing", "pytest", "unittest", "测试", "验证", "python 测试")),
+    (("uv", "依赖", "包管理", "安装", "运行命令", "sync"), ("package-manager", "uv", "python", "包管理", "命令执行")),
+    (("fastapi", "后端", "接口", "api", "web 框架", "服务"), ("framework", "fastapi", "python web", "后端", "接口")),
+]
 
 
 @dataclass(frozen=True)
@@ -137,6 +161,396 @@ def _evidence_refs_from_candidate(candidate: dict[str, Any]) -> list[str]:
     return refs or [str(candidate.get("id") or "candidate")]
 
 
+def _event_text(event: dict[str, Any]) -> str:
+    return str(event.get("content") or "").strip()
+
+
+def _event_ref(event: dict[str, Any], fallback_index: int) -> dict[str, Any]:
+    content = _event_text(event)
+    return {
+        "event_id": event.get("event_id") or f"event_{fallback_index}",
+        "source": event.get("source"),
+        "session_id": event.get("session_id"),
+        "event_type": event.get("event_type"),
+        "quote": content[:180],
+    }
+
+
+def _build_derived_fact(
+    *,
+    fact_type: str,
+    statement: str,
+    scope: str,
+    evidence_events: list[tuple[int, dict[str, Any]]],
+    confidence: float,
+    tags: list[str],
+    project: str | None = None,
+    reuse_scenarios: list[str] | None = None,
+    reason: str = "derived from repeated user behavior",
+) -> dict[str, Any]:
+    return {
+        "id": _candidate_id(normalize_memory_text(statement), scope, project),
+        "fact_type": fact_type,
+        "statement": statement,
+        "scope": scope,
+        "project": project,
+        "confidence": confidence,
+        "tags": tags,
+        "evidence": [_event_ref(event, index) for index, event in evidence_events],
+        "reuse_scenarios": reuse_scenarios or [],
+        "long_term": True,
+        "long_term_reason": reason,
+    }
+
+
+def _memory_source_role(event: dict[str, Any]) -> str:
+    return str(event.get("role") or event.get("type") or "").strip().lower()
+
+
+def _is_user_memory_source(event: dict[str, Any]) -> bool:
+    role = _memory_source_role(event)
+    event_type = str(event.get("event_type") or "")
+    return role == "user" or event_type in {"global_instruction", "project_instruction", "project_markers"}
+
+
+def derive_behavioral_facts(events: list[dict[str, Any]], *, project: str | None) -> list[dict[str, Any]]:
+    """Infer durable user-level memories from repeated short commands.
+
+    Direct rules catch explicit sentences, but real agent transcripts often expose
+    reusable preferences as command patterns: "继续", "做", "提交",
+    "推送", "拉取代码", or "梳理这个项目". These are not good
+    standalone memories, but repeated usage is valuable future context.
+    """
+    indexed = [(index, dict(event)) for index, event in enumerate(events, start=1)]
+
+    def matches(predicate) -> list[tuple[int, dict[str, Any]]]:
+        return [(index, event) for index, event in indexed if _is_user_memory_source(event) and predicate(_event_text(event), event)]
+
+    derived: list[dict[str, Any]] = []
+
+    continuation = matches(lambda text, event: text in {"继续", "做", "下一步", "开始"})
+    if len(continuation) >= 2:
+        derived.append(_build_derived_fact(
+            fact_type="workflow",
+            statement="用户常用“继续/做/下一步”推进已确认路线；当上下文已有明确计划时，应继续执行下一个合理步骤，不要反复要求确认。",
+            scope="user",
+            evidence_events=continuation[:5],
+            confidence=0.86,
+            tags=["continuation", "execution-style"],
+            reuse_scenarios=["用户说继续、做、下一步或开始时", "已存在明确计划或路线图时"],
+        ))
+
+    git_ops = matches(lambda text, event: text in {"提交", "推送", "拉取代码", "查看我当前的分支"} or any(token in text for token in ["新建一个分支", "切换到主分支", "调整主分支的版本号"]))
+    if len(git_ops) >= 3:
+        derived.append(_build_derived_fact(
+            fact_type="workflow",
+            statement="用户经常用简短指令要求仓库维护（拉取代码、查看分支、提交、推送、切分支、调版本）；应直接检查真实 git 状态并执行，完成后说明 commit/push/branch 状态。",
+            scope="user",
+            evidence_events=git_ops[:6],
+            confidence=0.88,
+            tags=["git", "repo-maintenance", "direct-execution"],
+            reuse_scenarios=["用户要求提交、推送、拉取代码、查看分支或切分支时"],
+        ))
+
+    cleanup_branch = matches(lambda text, event: any(token in text for token in ["精简", "删除模块", "主分支保留", "新建一个分支"]))
+    if len(cleanup_branch) >= 2:
+        derived.append(_build_derived_fact(
+            fact_type="workflow",
+            statement="做大规模功能精简或删除模块时，用户偏好先新建独立分支、主分支保留完整功能，并按计划逐步删除和验证。",
+            scope="user",
+            evidence_events=cleanup_branch[:5],
+            confidence=0.82,
+            tags=["branching", "cleanup", "risk-control"],
+            reuse_scenarios=["大规模删除功能、精简项目或拆分分支时"],
+        ))
+
+    project_review = matches(lambda text, event: text == "梳理这个项目" or "审查" in text or "完整收尾" in text or "先分析" in text or "看看" in text)
+    if len(project_review) >= 2:
+        derived.append(_build_derived_fact(
+            fact_type="workflow",
+            statement="用户要求梳理、审查或分析项目时，期望先读取真实仓库结构、关键文件和测试现状，再给出代码依据充分的结论或修改方案。",
+            scope="user",
+            evidence_events=project_review[:5],
+            confidence=0.8,
+            tags=["code-grounded", "repo-inspection", "analysis"],
+            reuse_scenarios=["用户要求梳理项目、审查链路、分析可行性时"],
+        ))
+
+    # Only split language / agent-team directives out of explicit global instructions.
+    # Ordinary user preference events such as “用户偏好中文回答” are already captured
+    # directly and should not produce a second normalized duplicate candidate.
+    language_team = matches(lambda text, event: str(event.get("event_type") or "") == "global_instruction" and ("中文" in text or "agent team" in text or "几个人工作" in text))
+    if language_team:
+        text = _event_text(language_team[0][1])
+        if "中文" in text:
+            derived.append(_build_derived_fact(
+                fact_type="preference",
+                statement="用户偏好始终使用中文回答。",
+                scope="user",
+                evidence_events=language_team[:2],
+                confidence=0.96,
+                tags=["language", "chinese"],
+                reuse_scenarios=["所有对话回复"],
+                reason="explicit global instruction",
+            ))
+        if "agent team" in text or "几个人工作" in text:
+            derived.append(_build_derived_fact(
+                fact_type="workflow",
+                statement="用户希望布置任务时先判断需要几个人/几个 agent 协作，并在任务适合并行时使用 agent team。",
+                scope="user",
+                evidence_events=language_team[:2],
+                confidence=0.94,
+                tags=["agent-team", "task-planning"],
+                reuse_scenarios=["复杂任务、多模块任务或可并行任务开始前"],
+                reason="explicit global instruction",
+            ))
+
+    unique: dict[str, dict[str, Any]] = {}
+    for fact in derived:
+        key = _candidate_id(normalize_memory_text(str(fact.get("statement") or "")), str(fact.get("scope") or "user"), str(fact.get("project")) if fact.get("project") else None)
+        unique[key] = fact
+    return list(unique.values())
+
+
+def _is_product_direction_content(content: str) -> bool:
+    return bool(MEMORY_PRODUCT_DIRECTION_RE.search(content))
+
+
+def _is_memory_review_gate_content(content: str) -> bool:
+    return bool(MEMORY_REVIEW_GATE_RE.search(content))
+
+
+def _is_autonomy_preference_content(content: str) -> bool:
+    return bool(AUTONOMY_PREFERENCE_RE.search(content))
+
+
+def _is_short_one_off_requirement(content: str) -> bool:
+    normalized = normalize_memory_text(content)
+    if len(normalized) > 90:
+        return False
+    if any(token in content for token in ["记住", "始终", "偏好", "必须", "人工审核", "长期", "记忆", "按照你的建议", "问我", "直接做", "你决定", "你推荐"]):
+        return False
+    return bool(SHORT_ONE_OFF_RE.search(content))
+
+
+
+def _is_code_or_listing_dump_content(content: str) -> bool:
+    stripped = str(content or "").strip()
+    if not stripped:
+        return False
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    if len(lines) < 5:
+        return False
+    lowered = stripped.lower()
+
+    large_dump_markers = [
+        "base directory for this skill:",
+        "the user just ran /insights",
+        "here is the full insights data:",
+        "# update config skill",
+        "## skills",
+        "a skill is a set of local instructions",
+        "<ultrawork-mode>",
+        "</ultrawork-mode>",
+        "[code red]",
+        "<codex_internal_context",
+        "</codex_internal_context>",
+        "<purpose>",
+        "<required_reading>",
+        "<process>",
+        "<<<<<<< head",
+        "failed to load resource",
+        "[routeguard]",
+        "# 知识图谱全面改进",
+        "项目目标达成",
+        "最终总结",
+        "this file provides guidance to codex",
+        "# agents.md",
+        'run the "deep-research" workflow',
+        "deep research harness",
+        "imagefont.truetype",
+        "draw.text(",
+        "===docs tree===",
+        "===backend root===",
+        "=== 磁盘空间",
+        "=== 内存使用评估",
+        "错误的推断过程",
+        "当前磁盘空间",
+        "test session starts",
+        "collected ",
+        " passed [",
+        "please analyze this codebase and create a claude.md",
+        "what to add:",
+        "修改账单图片中的文字信息",
+        "edit_bill_image",
+        "imagefont.truetype",
+    ]
+    if any(marker in lowered for marker in large_dump_markers):
+        return True
+
+    numbered = sum(1 for line in lines if re.match(r"^\s*\d+\s*\t", line))
+    codeish = sum(
+        1
+        for line in lines
+        if re.search(r"\b(from|import|class|def|return|const|let|function|dependencies)\b|<template>|</template>|\{|\}|\[project\]", line)
+    )
+    if numbered >= 3 and (codeish >= 2 or CODE_DUMP_RE.search(stripped)):
+        return True
+
+    unnumbered_codeish = sum(
+        1
+        for line in lines
+        if re.search(r'^\s*(from|import|class|def)\b|^\s*"""|^\s*async\s+def\b|imagefont\.|image\.', line.lower())
+    )
+    if len(stripped) > 500 and unnumbered_codeish >= 3:
+        return True
+
+    ls_listing_lines = sum(1 for line in lines if re.match(r"^[d-][rwx-]{9}\s+\d+\s+", line.strip()) or line.strip().startswith("total "))
+    if ls_listing_lines >= 3:
+        return True
+
+    absolute_path_lines = sum(1 for line in lines if re.match(r"^/(Users|tmp|var|private|home)/.*\.(py|ts|tsx|vue|json|toml|md|lock|pyc|ttf|otf|woff|woff2)$", line.strip()))
+    if absolute_path_lines >= 5:
+        return True
+
+    if DIRECTORY_DUMP_RE.search(stripped):
+        fileish = sum(1 for line in lines if re.search(r"(\.py|\.ts|\.vue|\.json|\.toml|\.lock|\.md|__pycache__|node_modules|tests?$)", line))
+        if fileish >= 3:
+            return True
+
+    if stripped.startswith("On branch ") and ("Changes to be committed:" in stripped or "Unmerged paths:" in stripped):
+        return True
+    return False
+
+def _is_low_value_event_content(content: str) -> bool:
+    if LOW_VALUE_EVENT_RE.search(content):
+        return True
+    if TASK_BRIEF_RE.search(content):
+        return True
+    if "file state is current in your context" in content:
+        return True
+    if "No need to Read it back" in content:
+        return True
+    if "pip install --upgrade pip" in content:
+        return True
+    if content.startswith("# In app browser:"):
+        return True
+    if content.startswith("# Files mentioned by the user:"):
+        return True
+    if "## My request for Codex:" in content and content.startswith("#"):
+        return True
+    if TRANSIENT_QUESTION_RE.search(content) and not any(token in content for token in ["记住", "始终", "偏好", "必须"]):
+        return True
+    return False
+
+
+
+
+def _is_structural_or_one_off_artifact(content: str, event_type: str) -> bool:
+    if event_type in {"global_instruction", "project_instruction", "project_markers"}:
+        return False
+    stripped = str(content or "").strip()
+    lowered = stripped.lower()
+    durable_markers = ["用户偏好", "始终使用中文", "不需要再问", "按照你的建议", "人工审核", "长期记忆"]
+    if any(marker in stripped for marker in durable_markers):
+        return False
+    if len(stripped) > 500 and any(marker in lowered for marker in ["请修复", "修改文件", "目标", "localstorage", "jwt token", "httpOnly".lower()]):
+        return True
+    if (
+        "this file provides guidance to codex" in lowered
+        or "please analyze this codebase and create a claude.md" in lowered
+        or "what to add:" in lowered and "commands that will be commonly used" in lowered
+        or stripped.startswith("# AGENTS.md")
+        or "箭头图片" in stripped
+        or "箭头字体" in stripped
+        or "font_arrow" in lowered
+        or "arrow_img" in lowered
+        or "typescript类型系统" in lowered
+        or "eslint配置" in lowered
+        or "⚠️ 待完善" in stripped
+        or "磁盘空间推断" in stripped
+        or "内存使用评估" in stripped
+    ):
+        return True
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if len(lines) >= 8:
+        short_pathish = sum(1 for line in lines if re.match(r"^[A-Za-z0-9_.@/-]+$", line) or line.startswith("---"))
+        fileish = sum(1 for line in lines if re.search(r"(\.py|\.ts|\.vue|\.json|\.toml|\.lock|__tests__|assets|components|stores|views|router|utils|api$|app\.vue|main\.ts)", line, re.I))
+        if short_pathish >= 7 and fileish >= 4:
+            return True
+    return False
+
+def _is_long_generic_memory_content(content: str, event_type: str) -> bool:
+    if event_type in {"global_instruction", "project_instruction", "project_markers"}:
+        return False
+    stripped = str(content or "").strip()
+    if len(stripped) <= 1500:
+        return False
+    durable_markers = [
+        "人工审核",
+        "长期记忆",
+        "按照你的建议",
+        "不需要再问",
+        "用户偏好",
+        "始终使用中文",
+    ]
+    if any(marker in stripped for marker in durable_markers):
+        return False
+    return True
+
+
+def _merge_fact_evidence(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    merged_refs = list(merged.get("evidence_refs") or [])
+    for ref in incoming.get("evidence_refs") or []:
+        if ref not in merged_refs:
+            merged_refs.append(ref)
+    if merged_refs:
+        merged["evidence_refs"] = merged_refs
+
+    merged_evidence = list(merged.get("evidence") or [])
+    seen_evidence = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in merged_evidence if isinstance(item, dict)}
+    for item in incoming.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        if key not in seen_evidence:
+            merged_evidence.append(item)
+            seen_evidence.add(key)
+    if merged_evidence:
+        merged["evidence"] = merged_evidence
+
+    merged["tags"] = sorted(set(merged.get("tags") or []) | set(incoming.get("tags") or []))
+    try:
+        merged["confidence"] = round(max(float(merged.get("confidence", 0) or 0), float(incoming.get("confidence", 0) or 0)), 3)
+    except (TypeError, ValueError):
+        pass
+    if incoming.get("long_term") is True:
+        merged["long_term"] = True
+    if incoming.get("long_term_reason") and incoming.get("long_term_reason") != merged.get("long_term_reason"):
+        reasons = [reason for reason in [merged.get("long_term_reason"), incoming.get("long_term_reason")] if reason]
+        merged["long_term_reason"] = "; ".join(dict.fromkeys(str(reason) for reason in reasons))
+    return merged
+
+
+def _dedupe_atomic_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[str, str, str | None, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str | None, str]] = []
+    for fact in facts:
+        statement = str(fact.get("statement") or "").strip()
+        key = (
+            str(fact.get("fact_type") or ""),
+            str(fact.get("scope") or "global"),
+            normalize_project_path(str(fact.get("project"))) if fact.get("project") else None,
+            normalize_memory_text(statement),
+        )
+        if key not in deduped:
+            deduped[key] = fact
+            order.append(key)
+        else:
+            deduped[key] = _merge_fact_evidence(deduped[key], fact)
+    return [deduped[key] for key in order]
+
 def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for index, raw_event in enumerate(events, start=1):
@@ -148,10 +562,123 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
         content = str(event.get("content") or "").strip()
         if not content or SENSITIVE_RE.search(content):
             continue
+        if not _is_user_memory_source(event):
+            continue
+        if _is_low_value_event_content(content):
+            continue
+        if event_type != "project_markers" and _is_code_or_listing_dump_content(content):
+            continue
+        if _is_long_generic_memory_content(content, event_type):
+            continue
+        if _is_structural_or_one_off_artifact(content, event_type):
+            continue
         lowered = content.lower()
         event_project = normalize_project_path(str(event.get("project") or project)) if (event.get("project") or project) else None
 
-        if event_type == "global_instruction" or "始终" in content or "偏好" in content or "prefer" in lowered:
+        if _is_short_one_off_requirement(content):
+            continue
+
+        if event_type == "project_instruction" and "uv" in lowered and "pnpm" in lowered:
+            facts.append(build_atomic_fact(
+                fact_type="workflow",
+                statement="Python 后端使用 uv 进行包管理，前端使用 pnpm 进行管理。",
+                scope="project" if event_project else "global",
+                project=str(event_project) if event_project else None,
+                source_event=event,
+                confidence=0.92,
+                tags=["package-manager", "uv", "pnpm", "python", "frontend"],
+            ))
+            continue
+
+        if event_type == "project_markers":
+            has_uv = "python_package_manager=uv" in lowered
+            has_pnpm = "frontend_package_manager=pnpm" in lowered
+            has_unittest = "python_test_runner=unittest" in lowered
+            has_pytest = "python_test_runner=pytest" in lowered
+            has_fastapi = "python_framework=fastapi" in lowered
+            has_django = "python_framework=django" in lowered
+            if has_uv or has_pnpm:
+                statement_parts = []
+                tags = ["package-manager"]
+                if has_uv:
+                    statement_parts.append("Python 项目使用 uv 进行包管理和命令执行")
+                    tags.extend(["uv", "python"])
+                if has_pnpm:
+                    statement_parts.append("前端项目使用 pnpm 进行包管理和脚本执行")
+                    tags.extend(["pnpm", "frontend"])
+                facts.append(build_atomic_fact(
+                    fact_type="workflow",
+                    statement="，".join(statement_parts) + "。",
+                    scope="project" if event_project else "global",
+                    project=str(event_project) if event_project else None,
+                    source_event=event,
+                    confidence=0.86,
+                    tags=tags,
+                ))
+            if has_unittest or has_pytest:
+                runner = "unittest" if has_unittest else "pytest"
+                facts.append(build_atomic_fact(
+                    fact_type="workflow",
+                    statement=f"Python 测试使用 {runner}，验证时应优先运行对应测试命令。",
+                    scope="project" if event_project else "global",
+                    project=str(event_project) if event_project else None,
+                    source_event=event,
+                    confidence=0.82,
+                    tags=["testing", "python", runner],
+                ))
+            if has_fastapi or has_django:
+                framework = "FastAPI" if has_fastapi else "Django"
+                facts.append(build_atomic_fact(
+                    fact_type="project_fact",
+                    statement=f"项目使用 {framework} 作为 Python Web 框架。",
+                    scope="project" if event_project else "global",
+                    project=str(event_project) if event_project else None,
+                    source_event=event,
+                    confidence=0.78,
+                    tags=["framework", "python", framework.lower()],
+                ))
+            continue
+
+        if _is_product_direction_content(content):
+            facts.append(build_atomic_fact(
+                fact_type="product_direction",
+                statement="Dream Memory 的产品方向是整理 Claude Code 和 Codex 会话，从中提取关键可复用信息并形成可被后续 agent 使用的共享记忆。",
+                scope="project" if event_project else "global",
+                project=str(event_project) if event_project else None,
+                source_event=event,
+                confidence=0.9,
+                tags=["product-direction", "memory", "claude-code", "codex"],
+            ))
+            continue
+
+        if _is_memory_review_gate_content(content):
+            facts.append(build_atomic_fact(
+                fact_type="workflow",
+                statement="正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。",
+                scope="project" if event_project else "global",
+                project=str(event_project) if event_project else None,
+                source_event=event,
+                confidence=0.9,
+                tags=["review-gate", "memory-safety"],
+            ))
+            continue
+
+        if _is_autonomy_preference_content(content):
+            facts.append(build_atomic_fact(
+                fact_type="preference",
+                statement="用户偏好在上下文清楚时由助手按判断直接推进，不要反复询问确认。",
+                scope="user",
+                project=None,
+                source_event=event,
+                confidence=0.88,
+                tags=["autonomy", "direct-execution"],
+            ))
+            continue
+
+        # Global instructions are split into smaller behavioral memories by
+        # derive_behavioral_facts() so one long instruction does not duplicate
+        # more specific preferences/workflows such as language and agent-team use.
+        if event_type != "global_instruction" and ("始终" in content or "偏好" in content or "prefer" in lowered):
             facts.append(build_atomic_fact(
                 fact_type="preference",
                 statement=content,
@@ -162,7 +689,9 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 tags=["preference"],
             ))
 
-        if any(word in content for word in ["希望", "想", "需要", "不要", "必须", "人工审核"]):
+        # Global instructions often contain words like “需要”, but they describe a
+        # user-level preference/workflow, not a project-scoped requirement.
+        if event_type != "global_instruction" and any(word in content for word in ["希望", "想", "需要", "不要", "必须", "人工审核"]):
             facts.append(build_atomic_fact(
                 fact_type="requirement",
                 statement=content,
@@ -194,7 +723,8 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 confidence=0.76,
                 tags=tags,
             ))
-    return facts
+    facts.extend(derive_behavioral_facts(events, project=project))
+    return _dedupe_atomic_facts(facts)
 
 def _candidate_id(content: str, scope: str, project: str | None) -> str:
     raw = f"{scope}|{project or ''}|{content}".encode("utf-8")
@@ -292,9 +822,11 @@ def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     score += min(evidence_count, 4) * 0.12
     if candidate.get("scope") == "project":
         score += 0.18
-    if candidate.get("type") in {"preference", "requirement", "project_fact"}:
+    if candidate.get("scope") in {"user", "global"}:
+        score += 0.12
+    if candidate.get("type") in {"preference", "requirement", "project_fact", "workflow", "decision", "pitfall", "product_direction", "rejected_option"}:
         score += 0.18
-    if tags & {"uv", "python", "dreams", "claude-code", "codex", "patch"}:
+    if tags & {"uv", "python", "dreams", "claude-code", "codex", "patch", "git", "repo-maintenance", "continuation", "agent-team", "code-grounded"}:
         score += 0.12
     if len(content) >= 12:
         score += 0.08
@@ -378,12 +910,17 @@ def detect_candidate_conflicts(candidates: list[dict[str, Any]], memory_cards: l
                 continue
             if card.get("memory_type") != candidate_type:
                 continue
-            if str(card.get("summary") or "") == content:
+            summary = str(card.get("summary") or "")
+            if summary == content:
+                continue
+            similarity = _text_similarity(content, summary)
+            if similarity < 0.18:
                 continue
             conflicts.setdefault(str(candidate["id"]), []).append({
                 "memory_id": card.get("id"),
-                "reason": "same-scope-type-different-summary",
+                "reason": "similar-same-scope-type",
                 "summary": card.get("summary"),
+                "similarity": round(similarity, 3),
             })
     return conflicts
 
@@ -402,13 +939,58 @@ def _active_matching_cards(candidate: dict[str, Any], memory_cards: list[dict[st
     return matches
 
 
+def _evidence_quality(candidate: dict[str, Any]) -> tuple[str, float]:
+    evidence = candidate.get("evidence", []) if isinstance(candidate.get("evidence"), list) else []
+    tags = {str(tag).lower() for tag in candidate.get("tags", []) if str(tag).strip()}
+    event_types = {str(item.get("event_type") or "") for item in evidence if isinstance(item, dict)}
+    if "global_instruction" in event_types or "explicit" in tags or "language" in tags:
+        return "explicit_instruction", 0.75
+    if len(evidence) >= 3:
+        return "repeated_behavior", 0.7
+    if len(evidence) >= 2:
+        return "multi_event", 0.5
+    if len(evidence) == 1:
+        return "single_event", 0.25
+    return "missing", 0.0
+
+
+def _intent_relevance_boost(task: str | None, searchable: str) -> float:
+    if not task:
+        return 0.0
+    normalized_task = str(task).lower()
+    normalized_searchable = searchable.lower()
+    boost = 0.0
+    matched_trigger_count = 0
+    for triggers, targets in TASK_INTENT_ALIASES:
+        if any(trigger.lower() in normalized_task for trigger in triggers):
+            matched_trigger_count += 1
+            if any(target.lower() in normalized_searchable for target in targets):
+                boost = max(boost, 0.9)
+
+    # When a short task names one specific execution intent, avoid broad terms
+    # like "python" making adjacent project-marker memories tie the precise one.
+    if matched_trigger_count == 1 and boost > 0:
+        if any(trigger.lower() in normalized_task for trigger in ("uv", "依赖", "包管理", "安装", "运行命令", "sync")):
+            if "package-manager" in normalized_searchable or "uv" in normalized_searchable or "包管理" in normalized_searchable or "命令执行" in normalized_searchable:
+                return 1.05
+        if any(trigger.lower() in normalized_task for trigger in ("测试", "跑测试", "验证", "单测", "pytest", "unittest", "test")):
+            if "testing" in normalized_searchable or "pytest" in normalized_searchable or "unittest" in normalized_searchable or "python 测试" in normalized_searchable:
+                return 1.05
+        if any(trigger.lower() in normalized_task for trigger in ("fastapi", "后端", "接口", "api", "web 框架", "服务")):
+            if "framework" in normalized_searchable or "fastapi" in normalized_searchable or "python web" in normalized_searchable:
+                return 1.05
+    return boost
+
+
 def explain_candidate_quality(candidate: dict[str, Any], memory_cards: list[dict[str, Any]]) -> dict[str, Any]:
     content = str(candidate.get("content") or "")
     normalized_content = normalize_memory_text(content)
     evidence_count = len(candidate.get("evidence", []))
+    evidence_quality, evidence_strength = _evidence_quality(candidate)
     score = float(candidate.get("score", candidate.get("confidence", 0.0)) or 0.0)
     memory_type = str(candidate.get("type") or "")
-    one_off = bool(ONE_OFF_MEMORY_RE.search(content)) or "task" in {str(tag).lower() for tag in candidate.get("tags", [])}
+    tags = {str(tag).lower() for tag in candidate.get("tags", []) if str(tag).strip()}
+    one_off = bool(ONE_OFF_MEMORY_RE.search(content)) or "task" in tags
     matching_cards = _active_matching_cards(candidate, memory_cards)
     exact_match = next((card for card in matching_cards if normalize_memory_text(str(card.get("summary") or "")) == normalized_content), None)
     similar_cards = [
@@ -419,18 +1001,29 @@ def explain_candidate_quality(candidate: dict[str, Any], memory_cards: list[dict
     similar_cards = [(card, similarity) for card, similarity in similar_cards if similarity >= 0.18]
     best_similar = max(similar_cards, key=lambda item: item[1], default=(None, 0.0))
     matched_card = exact_match or best_similar[0]
+    matched_summary = str(matched_card.get("summary") or "") if isinstance(matched_card, dict) else None
+    if exact_match is not None:
+        value_class = "existing_duplicate"
+    elif matched_card is not None:
+        value_class = "similar_existing"
+    else:
+        value_class = "new_value"
     durable_types = {"preference", "decision", "workflow", "pitfall", "product_direction", "rejected_option"}
+    durable_project_fact_tags = {"framework", "package-manager", "testing"}
+    is_durable_project_fact = memory_type == "project_fact" and bool(tags & durable_project_fact_tags)
     stability = 0.25
-    if memory_type in durable_types:
+    if memory_type in durable_types or is_durable_project_fact:
         stability += 0.3
-    if evidence_count >= 2:
+    if evidence_quality == "explicit_instruction":
+        stability += 0.2
+    elif evidence_count >= 2:
         stability += 0.2
     if score >= 0.8:
         stability += 0.15
     if one_off:
         stability -= 0.35
     reuse_value = 0.25
-    if memory_type in durable_types:
+    if memory_type in durable_types or is_durable_project_fact:
         reuse_value += 0.3
     if candidate.get("scope") in {"user", "global", "project"}:
         reuse_value += 0.15
@@ -441,11 +1034,14 @@ def explain_candidate_quality(candidate: dict[str, Any], memory_cards: list[dict
     return {
         "stability": max(0.0, min(1.0, round(stability, 3))),
         "reuse_value": max(0.0, min(1.0, round(reuse_value, 3))),
-        "evidence_strength": max(0.0, min(1.0, round(min(evidence_count, 4) / 4, 3))),
+        "evidence_strength": max(0.0, min(1.0, round(evidence_strength, 3))),
+        "evidence_quality": evidence_quality,
         "one_off_task": one_off,
         "duplicate": exact_match is not None,
+        "value_class": value_class,
         "similarity": round(1.0 if exact_match else best_similar[1], 3),
         "matched_memory_id": matched_card.get("id") if isinstance(matched_card, dict) else None,
+        "matched_memory_summary": matched_summary,
     }
 
 
@@ -535,18 +1131,25 @@ def analyze_dream_candidate(
 
     if duplicate:
         suggested_action = duplicate_action
+        decision_reason = f"candidate already exists in memory {quality_signals.get('matched_memory_id') or 'unknown'}"
     elif reject_one_off and one_off:
         suggested_action = "reject"
+        decision_reason = "one-off task is not durable long-term memory"
     elif require_evidence and evidence_strength <= 0:
         suggested_action = "needs_more_evidence"
+        decision_reason = "candidate needs evidence before promotion"
     elif (conflicts or quality_signals.get("matched_memory_id")) and dream_score >= review_threshold:
         suggested_action = conflict_action
+        decision_reason = f"candidate overlaps existing memory {quality_signals.get('matched_memory_id') or 'unknown'}"
     elif dream_score >= promote_threshold:
         suggested_action = "create"
+        decision_reason = "new reusable memory with enough stability and reuse value"
     elif dream_score >= review_threshold:
         suggested_action = "review"
+        decision_reason = "potentially useful memory that needs human judgment"
     else:
         suggested_action = "reject"
+        decision_reason = "low dream score for long-term reuse"
 
     return {
         "dream_score": dream_score,
@@ -554,6 +1157,7 @@ def analyze_dream_candidate(
         "reasons": reasons,
         "penalties": penalties,
         "matched_memory_id": quality_signals.get("matched_memory_id"),
+        "decision_reason": decision_reason,
         "policy": {
             "promote_threshold": promote_threshold,
             "review_threshold": review_threshold,
@@ -729,10 +1333,8 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
     normalized_project = normalize_project_path(project)
     task_tokens = _tokens(task or "")
 
-    def relevance(card: dict[str, Any]) -> float:
-        if not task_tokens:
-            return 0.0
-        searchable = " ".join(
+    def searchable_text(card: dict[str, Any]) -> str:
+        return " ".join(
             str(value)
             for value in [
                 card.get("summary"),
@@ -741,10 +1343,34 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
                 " ".join(str(item) for item in card.get("tags", []) if item),
             ]
         )
+
+    def relevance_parts(card: dict[str, Any]) -> dict[str, Any]:
+        searchable = searchable_text(card)
         card_tokens = _tokens(searchable)
-        if not card_tokens:
+        matched_tokens = sorted(task_tokens & card_tokens)
+        token_score = len(matched_tokens) / len(task_tokens) if task_tokens and card_tokens else 0.0
+        intent_score = _intent_relevance_boost(task, searchable) if task_tokens else 0.0
+        score = max(token_score, intent_score)
+        if not task_tokens:
+            reason = "default_scope_order"
+        elif intent_score > token_score:
+            reason = "intent_alias_match"
+        elif token_score > 0:
+            reason = "token_overlap"
+        else:
+            reason = "scope_fallback"
+        return {
+            "relevance": round(score, 4),
+            "token_score": round(token_score, 4),
+            "intent_score": round(intent_score, 4),
+            "matched_tokens": matched_tokens,
+            "reason": reason,
+        }
+
+    def relevance(card: dict[str, Any]) -> float:
+        if not task_tokens:
             return 0.0
-        return len(task_tokens & card_tokens) / len(task_tokens)
+        return float(relevance_parts(card)["relevance"])
 
     def scope_rank(card: dict[str, Any]) -> int:
         card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
@@ -760,7 +1386,14 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
 
     def rank(card: dict[str, Any]) -> tuple[float, int, int, str]:
         card_relevance = relevance(card)
-        default_rank = 0 if task_tokens and card_relevance == 0 and card.get("scope") in {"user", "global"} else 1
+        if not task_tokens:
+            default_rank = 0
+        elif card_relevance > 0:
+            default_rank = 0
+        elif card.get("scope") in {"user", "global"}:
+            default_rank = 1
+        else:
+            default_rank = 2
         return (-card_relevance, default_rank, scope_rank(card), str(card.get("summary")))
 
     filtered = []
@@ -775,7 +1408,17 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
             card["project"] = card_project
         filtered.append(card)
     ranked = sorted(filtered, key=rank)[:limit]
-    payload = {"project": normalized_project, "count": len(ranked), "items": ranked}
+    diagnostics = []
+    for index, card in enumerate(ranked, start=1):
+        diagnostics.append({
+            "rank": index,
+            "id": card.get("id"),
+            "scope": card.get("scope"),
+            "memory_type": card.get("memory_type"),
+            "scope_rank": scope_rank(card),
+            **relevance_parts(card),
+        })
+    payload = {"project": normalized_project, "count": len(ranked), "items": ranked, "diagnostics": diagnostics}
     if task:
         payload["task"] = task
     return payload
@@ -783,12 +1426,19 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
 
 def render_context_markdown(context: dict[str, Any]) -> str:
     lines = ["## Relevant Memory", ""]
+    diagnostics_by_id = {str(item.get("id")): item for item in context.get("diagnostics", []) if item.get("id")}
     for item in context.get("items", []):
         prefix = str(item.get("scope"))
         if item.get("project"):
             prefix = f"{prefix}: {item['project']}"
-        lines.append(f"- **{prefix} / {item.get('memory_type')}**: {item.get('summary')}")
+        summary = str(item.get("summary") or item.get("content") or "")
+        diag = diagnostics_by_id.get(str(item.get("id")))
+        suffix = ""
+        if diag:
+            suffix = f" _(rank_reason={diag.get('reason')}, relevance={diag.get('relevance')})_"
+        lines.append(f"- **{prefix} / {item.get('memory_type')}**: {summary}{suffix}")
     return "\n".join(lines) + "\n"
+
 
 def _analysis_for_report(candidate: dict[str, Any]) -> dict[str, Any]:
     if isinstance(candidate.get("dream_analysis"), dict):
@@ -817,7 +1467,21 @@ def _candidate_report_line(candidate: dict[str, Any], analysis: dict[str, Any]) 
     )
 
 
-def _render_dreams(events: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> str:
+def _count_by_key(items: list[dict[str, Any]], key: str, *, fallback: str = "unknown") -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or fallback)
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _format_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def _render_dreams(events: list[dict[str, Any]], candidates: list[dict[str, Any]], *, facts: list[dict[str, Any]] | None = None) -> str:
     analyzed: list[tuple[dict[str, Any], dict[str, Any]]] = [
         (candidate, _analysis_for_report(candidate))
         for candidate in candidates
@@ -836,6 +1500,16 @@ def _render_dreams(events: list[dict[str, Any]], candidates: list[dict[str, Any]
         "",
         f"- Events scanned: {len(events)}",
         f"- Candidates: {len(candidates)}",
+        "",
+        "## Fact Diagnostics",
+        "",
+        f"- Facts extracted: {len(facts or [])}",
+        f"- Facts by type: {_format_counts(_count_by_key(facts or [], 'fact_type'))}",
+        f"- Candidates by type: {_format_counts(_count_by_key(candidates, 'type'))}",
+        "",
+        "## Evidence Quality",
+        "",
+        f"- Quality tiers: {_format_counts(_count_by_key([candidate.get('quality_signals', {}) if isinstance(candidate.get('quality_signals'), dict) else {} for candidate in candidates], 'evidence_quality'))}",
         "",
         "## Promotion Policy",
         "",
@@ -925,7 +1599,7 @@ def dream_from_events(
     write_jsonl_records(candidates, candidates_path)
 
     dreams_path = output / "DREAMS.md"
-    dreams_path.write_text(_render_dreams(events, candidates), encoding="utf-8")
+    dreams_path.write_text(_render_dreams(events, candidates, facts=facts), encoding="utf-8")
 
     preview_path = output / "MEMORY.preview.md"
     preview_text = _render_memory_preview(candidates)

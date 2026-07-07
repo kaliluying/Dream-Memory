@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from .memory_cli import _resume_run, _run_dream_to_review
+from .memory_cli import _auto_review_run, _resume_run, _run_dream_to_review
 from .memory_config import load_memory_config, normalize_memory_config
 from .memory_dreaming import normalize_review_decision
 from .memory_runs import append_trace, create_run_state, list_runs, load_run_state, read_trace, update_run_state
@@ -51,6 +51,15 @@ class MemoryModelsRequest(BaseModel):
     api_key_env: str | None = None
     base_url: str | None = None
     timeout_seconds: int | None = None
+
+
+class MemoryAutoReviewRequest(BaseModel):
+    reviewer: str = "auto-review"
+    min_score: float = 0.7
+    keep_review: bool = False
+    include_duplicates: bool = False
+    include_merges: bool = False
+    force: bool = False
 
 
 MEMORY_CONFIG_HTML = """
@@ -308,7 +317,7 @@ MEMORY_REVIEW_HTML = """
     .config-button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; border:1px solid var(--green); border-radius:8px; padding:9px 13px; background:var(--green); color:#fff; text-decoration:none; font-weight:850; line-height:1.2; }
     .config-button:hover { background:#25593f; border-color:#25593f; }
     .config-button:focus-visible { outline:3px solid rgba(47,107,79,.24); outline-offset:2px; }
-    .toolbar { display:grid; grid-template-columns:minmax(190px,1fr) 132px 132px; gap:10px; min-width:min(100%,520px); }
+    .toolbar { display:grid; grid-template-columns:minmax(190px,1fr) 142px 132px 132px; gap:10px; min-width:min(100%,520px); }
     .workspace { display:grid; grid-template-columns:minmax(360px,1.05fr) minmax(390px,.95fr); gap:18px; padding:0 30px 30px; min-height:0; }
     .panel { min-width:0; border:1px solid var(--line); border-radius:10px; background:rgba(255,253,248,.92); box-shadow:var(--shadow); }
     .queue-panel,.detail-panel { display:grid; grid-template-rows:auto minmax(0,1fr); min-height:660px; }
@@ -334,6 +343,10 @@ MEMORY_REVIEW_HTML = """
     .pill.amber { background:var(--amber-soft); color:#70490f; }
     .pill.red { background:var(--red-soft); color:#82352f; }
     .pill.blue { background:var(--blue-soft); color:#254f79; }
+    .pill.value-new { background:#dcebe1; color:#24563f; }
+    .pill.value-dup { background:#f0d7d2; color:#82352f; }
+    .pill.value-similar { background:#f3e5c8; color:#70490f; }
+    .match-note { margin:0; color:#6b5f52; font-size:12px; line-height:1.4; }
     .detail-body { min-height:0; overflow:auto; padding:18px; }
     .empty-state { min-height:320px; display:grid; place-items:center; border:1px dashed #cbbca5; border-radius:10px; background:#fbf6ed; color:var(--muted); text-align:center; padding:24px; }
     .detail-title { display:grid; gap:8px; margin-bottom:14px; }
@@ -368,12 +381,14 @@ MEMORY_REVIEW_HTML = """
     <section class="side-section"><h2 class="side-title">运行状态 <span id="runCount" class="pill">0</span></h2><div id="runs" class="run-list loading">正在加载运行记录...</div></section>
     <section class="side-section"><h2 class="side-title">运行进度</h2><div id="runProgress" class="loading">选择 run 后显示模型进度</div></section>
     <section class="side-section"><h2 class="side-title">审核进度</h2><div id="reviewProgress" class="loading">选择 run 后显示进度</div></section>
+    <section class="side-section"><h2 class="side-title">候选汇总</h2><div id="reviewSummary" class="loading">选择 run 后显示候选分布</div></section>
+    <section class="side-section"><h2 class="side-title">自动审核预览</h2><div class="start-form"><label>最低分 <input id="autoReviewMinScore" type="number" min="0" max="1" step="0.05" value="0.7" /></label><label class="check"><input id="autoReviewIncludeDuplicates" type="checkbox" /> 包含重复项</label><label class="check"><input id="autoReviewIncludeMerges" type="checkbox" /> 包含合并项</label><label class="check"><input id="autoReviewForce" type="checkbox" /> 覆盖现有 reviewed</label><div class="quick-row"><button type="button" onclick="previewAutoReview()">预览</button><button type="button" onclick="applyAutoReview()">写入 reviewed</button></div><div id="autoReviewPreview" class="loading">选择 run 后可预览自动审核影响</div></div></section>
   </aside>
   <section class="layout">
-    <header class="topbar"><div><span class="eyebrow">Human-in-the-loop memory curation</span><h2>候选记忆审核</h2><p>快速筛掉噪声，补足证据，把真正有复用价值的信息沉淀下来。</p></div><div class="topbar-tools"><a class="config-button" href="/memory-config" aria-label="打开运行配置">运行配置</a><div class="toolbar" aria-label="候选过滤器"><input id="search" type="search" placeholder="搜索内容、标签、证据" /><select id="statusFilter" aria-label="状态筛选"><option value="">全部状态</option><option value="promote">promote</option><option value="review">review</option><option value="reject">reject</option></select><select id="scopeFilter" aria-label="范围筛选"><option value="">全部范围</option><option value="user">user</option><option value="global">global</option><option value="project">project</option></select></div></div></header>
+    <header class="topbar"><div><span class="eyebrow">Human-in-the-loop memory curation</span><h2>候选记忆审核</h2><p>快速筛掉噪声，补足证据，把真正有复用价值的信息沉淀下来。</p></div><div class="topbar-tools"><a class="config-button" href="/memory-config" aria-label="打开运行配置">运行配置</a><div class="toolbar" aria-label="候选过滤器"><input id="search" type="search" placeholder="搜索内容、标签、证据" /><select id="valueFilter" aria-label="价值筛选"><option value="">按价值分组</option><option value="new_value">新增价值</option><option value="existing_duplicate">已有记忆重复</option><option value="similar_existing">相似可合并</option></select><select id="statusFilter" aria-label="状态筛选"><option value="">全部状态</option><option value="promote">promote</option><option value="review">review</option><option value="reject">reject</option></select><select id="scopeFilter" aria-label="范围筛选"><option value="">全部范围</option><option value="user">user</option><option value="global">global</option><option value="project">project</option></select></div></div></header>
     <div class="workspace">
       <section class="panel queue-panel" aria-label="候选分组"><div class="panel-head"><h3>候选分组</h3><p id="queueSummary">正在加载候选项...</p><div class="stats-grid"><div class="stat"><b id="totalCount">0</b><span>Total</span></div><div class="stat"><b id="reviewCount">0</b><span>Review</span></div><div class="stat"><b id="promoteCount">0</b><span>Promote</span></div><div class="stat"><b id="rejectCount">0</b><span>Reject</span></div></div></div><div id="list" class="queue-body loading">正在加载...</div></section>
-      <section class="panel detail-panel" aria-label="候选详情"><div class="panel-head"><h3>审核详情</h3><p id="status" class="status-line">选择一个候选项开始审核</p></div><div class="detail-body"><div id="emptyDetail" class="empty-state"><div><strong>还没有选择候选记忆</strong><p>从左侧队列点选一条记录，查看证据、冲突和运行 trace。</p></div></div><div id="detailContent" hidden><div class="detail-title"><h3 id="title">选择一个候选项</h3><div class="meta-line" id="meta"></div></div><label class="field-label" for="content">候选内容</label><textarea id="content" placeholder="候选内容，可编辑后批准"></textarea><label class="field-label" for="note">审核备注</label><textarea id="note" placeholder="记录保留、拒绝或合并的原因"></textarea><div class="actions"><button class="primary" onclick="submitReview('approved')">批准</button><button class="secondary" onclick="submitReview('edited_and_approved')">编辑后批准</button><button class="secondary" onclick="submitReview('merged')">合并</button><button class="more" onclick="submitReview('needs_more_evidence')">需要更多证据</button><button class="reject" onclick="submitReview('rejected')">拒绝</button></div><button class="resume" onclick="resumeSelectedRun()">恢复并应用 Run</button><div class="info-grid"><div class="info-box"><b>Candidate ID</b><span id="candidateId">-</span></div><div class="info-box"><b>Suggested Action</b><span id="suggestedAction">-</span></div></div><label class="field-label">Evidence</label><pre id="evidence" class="code-block"></pre><label class="field-label">Run Trace</label><pre id="trace" class="code-block"></pre></div></div></section>
+      <section class="panel detail-panel" aria-label="候选详情"><div class="panel-head"><h3>审核详情</h3><p id="status" class="status-line">选择一个候选项开始审核</p></div><div class="detail-body"><div id="emptyDetail" class="empty-state"><div><strong>还没有选择候选记忆</strong><p>从左侧队列点选一条记录，查看证据、冲突和运行 trace。</p></div></div><div id="detailContent" hidden><div class="detail-title"><h3 id="title">选择一个候选项</h3><div class="meta-line" id="meta"></div></div><label class="field-label" for="content">候选内容</label><textarea id="content" placeholder="候选内容，可编辑后批准"></textarea><label class="field-label" for="note">审核备注</label><textarea id="note" placeholder="记录保留、拒绝或合并的原因"></textarea><div class="actions"><button class="primary" onclick="submitReview('approved')">批准</button><button class="secondary" onclick="submitReview('edited_and_approved')">编辑后批准</button><button class="secondary" onclick="submitReview('merged')">合并</button><button class="more" onclick="submitReview('needs_more_evidence')">需要更多证据</button><button class="reject" onclick="submitReview('rejected')">拒绝</button></div><button class="resume" onclick="resumeSelectedRun()">恢复并应用 Run</button><div class="info-grid"><div class="info-box"><b>Candidate ID</b><span id="candidateId">-</span></div><div class="info-box"><b>Suggested Action</b><span id="suggestedAction">-</span></div></div><label class="field-label">Dream Analysis</label><pre id="dreamAnalysis" class="code-block"></pre><label class="field-label">Quality Signals</label><pre id="qualitySignals" class="code-block"></pre><label class="field-label">Evidence</label><pre id="evidence" class="code-block"></pre><label class="field-label">Run Trace</label><pre id="trace" class="code-block"></pre></div></div></section>
     </div>
   </section>
 </main>
@@ -385,7 +400,7 @@ async function startAiRun(event){event.preventDefault();if(!startDefaultsLoaded)
 async function loadRuns(){try{const res=await fetch('/api/memory/runs');const data=await res.json();const runs=data.runs||[];document.getElementById('runCount').textContent=runs.length;const box=document.getElementById('runs');box.innerHTML=runs.slice(0,8).map(r=>runHtml(r)).join('')||'<div class="loading">暂无 run</div>';if(selectedRunId){await refreshSelectedRun();}}catch(error){document.getElementById('runs').innerHTML=`<div class="loading">运行记录加载失败：${escapeHtml(error.message)}</div>`;}}
 function runHtml(r){const active=selectedRunId===r.run_id?' active':'';return `<button class="run-card${active}" onclick="selectRun(${jsArg(r.run_id)})"><span class="run-id">${escapeHtml(r.run_id)}</span><span class="run-meta"><span class="pill green">${escapeHtml(r.status||'unknown')}</span><span class="pill">${escapeHtml(r.phase||'phase')}</span></span><span class="run-id muted">${escapeHtml(formatDate(r.updated_at))}</span></button>`;}
 async function selectRun(runId){selectedRunId=runId;selected=null;syncDetail();document.getElementById('status').textContent=`当前 run: ${runId}`;await refreshSelectedRun();await loadRuns();renderList();}
-async function refreshSelectedRun(){if(!selectedRunId)return;const state=await loadRunState(selectedRunId);const trace=await loadTraceData(selectedRunId);renderRunProgress(state,trace);if(state.status==='waiting_review'||state.status==='completed'){await loadReviewQueue(selectedRunId);await loadReviewProgress();renderList();}else{candidates=[];renderList();document.getElementById('reviewProgress').innerHTML='<div class="loading">候选生成完成后显示审核进度</div>';}if(selected){await loadTrace();}}
+async function refreshSelectedRun(){if(!selectedRunId)return;const state=await loadRunState(selectedRunId);const trace=await loadTraceData(selectedRunId);renderRunProgress(state,trace);if(state.status==='waiting_review'||state.status==='completed'){await loadReviewQueue(selectedRunId);await loadReviewProgress();await loadReviewSummary();renderList();}else{candidates=[];renderList();document.getElementById('reviewProgress').innerHTML='<div class="loading">候选生成完成后显示审核进度</div>';}if(selected){await loadTrace();}}
 async function loadRunState(runId){const res=await fetch(`/api/memory/runs/${runId}`);if(!res.ok)throw new Error(`run 状态加载失败：${res.status}`);return await res.json();}
 async function loadTraceData(runId){const res=await fetch(`/api/memory/runs/${runId}/trace`);if(!res.ok)return[];const data=await res.json();return data.trace||[];}
 function renderRunProgress(state,trace){const status=state.status||'unknown';const phase=state.phase||'unknown';const counts=state.counts||{};const attemptEvents=trace.filter(row=>String(row.event_type||'').startsWith('model_attempt_'));const latestAttempt=attemptEvents[attemptEvents.length-1];const pct=runPercent(status,phase,trace);const steps=[['queued','已创建 run',trace.some(e=>e.event_type==='run_queued')||status!=='created'],['events','已复制事件',trace.some(e=>e.event_type==='events_copied')],['model','模型提取候选',trace.some(e=>e.event_type==='ai_extraction_complete')],['review','等待审核',status==='waiting_review'||status==='completed'],['done','已应用',status==='completed']];const stepHtml=steps.map(([key,label,done])=>`<div class="progress-step ${done?'done':currentStepClass(key,status,phase,trace)}"><span class="progress-dot"></span><span>${escapeHtml(label)}</span></div>`).join('');const attemptHtml=attemptEvents.slice(-4).map(row=>attemptLine(row)).join('')||'<span>模型调用尚未开始</span>';const error=state.error?`<div class="progress-error">${escapeHtml(state.error)}</div>`:'';document.getElementById('runProgress').innerHTML=`<div class="progress-card"><div class="progress-title"><strong>${escapeHtml(statusLabel(status,phase))}</strong><span>${pct}%</span></div><div class="progress-bar" aria-label="运行进度"><span style="width:${pct}%"></span></div><div>${escapeHtml(state.model||'')}</div><div class="progress-steps">${stepHtml}</div><div class="progress-log">${attemptHtml}${error}</div><div>候选：<strong>${counts.candidate_count||0}</strong> · 待审核：<strong>${counts.review_count||0}</strong></div></div>`;}
@@ -393,16 +408,24 @@ function currentStepClass(key,status,phase,trace){if(status==='failed')return'';
 function runPercent(status,phase,trace){if(status==='completed')return 100;if(status==='waiting_review')return 82;if(status==='failed')return 100;if(trace.some(e=>e.event_type==='ai_extraction_complete'))return 72;if(trace.some(e=>e.event_type==='model_attempt_started'))return 45;if(trace.some(e=>e.event_type==='events_copied'))return 28;if(status==='queued')return 12;return 5;}
 function statusLabel(status,phase){if(status==='waiting_review')return'等待审核';if(status==='completed')return'已应用';if(status==='failed')return'运行失败';if(phase==='extracting')return'模型提取中';if(status==='queued')return'已排队';return `${status} / ${phase}`;}
 function attemptLine(row){const payload=row.payload||{};const event=row.event_type||'';const attempt=payload.attempt||'-';const elapsed=payload.elapsed_ms?`${Math.round(payload.elapsed_ms/1000)}s`:'';if(event==='model_attempt_started')return`<span>第 ${escapeHtml(attempt)} 次调用开始 · ${escapeHtml(payload.model||'')}</span>`;if(event==='model_attempt_succeeded')return`<span>第 ${escapeHtml(attempt)} 次调用成功 ${escapeHtml(elapsed)}</span>`;if(event==='model_attempt_failed')return`<span class="progress-error">第 ${escapeHtml(attempt)} 次失败 ${escapeHtml(elapsed)} · ${escapeHtml(payload.error_kind||payload.error||'')}</span>`;return`<span>${escapeHtml(event)}</span>`;}
-async function loadReviewQueue(runId){const res=await fetch(`/api/memory/runs/${runId}/review-queue`);const data=await res.json();const items=data.items||[];if(items.length){candidates=items.map(item=>Object.assign({},item.candidate||{},{conflicts:item.conflicts||[],review_queue_status:item.status,suggested_action:item.suggested_action,candidate_id:item.candidate_id}));return;}const fallback=await fetch(`/api/memory/runs/${runId}/candidates`);const fallbackData=await fallback.json();candidates=fallbackData.candidates||[];}
-async function loadReviewProgress(){if(!selectedRunId)return;const res=await fetch(`/api/memory/runs/${selectedRunId}/review-progress`);const data=await res.json();latestProgress=data;const actions=data.actions||{};const total=data.total||0;const reviewed=data.reviewed||0;const pct=total?Math.round((reviewed/total)*100):0;document.getElementById('reviewProgress').innerHTML=`<div class="progress"><div><strong>${reviewed}</strong> / ${total} reviewed</div><div>Pending: <strong>${data.pending||0}</strong></div><div>Approved: ${actions.approved||0} &middot; Rejected: ${actions.rejected||0} &middot; Needs evidence: ${actions.needs_more_evidence||0}</div><div aria-label="progress" style="height:7px;border-radius:999px;background:rgba(255,255,255,.14);overflow:hidden;"><div style="height:100%;width:${pct}%;background:#cfe2cf;"></div></div></div>`;}
+async function loadReviewQueue(runId){const res=await fetch(`/api/memory/runs/${runId}/review-queue`);const data=await res.json();const items=data.items||[];if(items.length){candidates=items.map(item=>Object.assign({},item.candidate||{},{conflicts:item.conflicts||[],quality_signals:item.quality_signals||{},dream_analysis:item.dream_analysis||{},review_queue_status:item.status,suggested_action:item.suggested_action,candidate_id:item.candidate_id}));return;}const fallback=await fetch(`/api/memory/runs/${runId}/candidates`);const fallbackData=await fallback.json();candidates=fallbackData.candidates||[];}
+async function loadReviewProgress(){if(!selectedRunId)return;const res=await fetch(`/api/memory/runs/${selectedRunId}/review-progress`);const data=await res.json();latestProgress=data;const actions=data.actions||{};const total=data.total||0;const reviewed=data.reviewed||0;const pct=total?Math.round((reviewed/total)*100):0;document.getElementById('reviewProgress').innerHTML=`<div class="progress"><div><strong>${reviewed}</strong> / ${total} reviewed</div><div>Pending: <strong>${data.pending||0}</strong> · Source: ${escapeHtml(data.source||'-')}</div><div>Approved: ${actions.approved||0} &middot; Rejected: ${actions.rejected||0} &middot; Needs evidence: ${actions.needs_more_evidence||0}</div><div>Suggested: ${escapeHtml(JSON.stringify(data.suggested_actions||{}))}</div><div aria-label="progress" style="height:7px;border-radius:999px;background:rgba(255,255,255,.14);overflow:hidden;"><div style="height:100%;width:${pct}%;background:#cfe2cf;"></div></div></div>`;}
+async function loadReviewSummary(){if(!selectedRunId)return;const res=await fetch(`/api/memory/runs/${selectedRunId}/review-summary`);const data=await res.json();if(!res.ok){document.getElementById('reviewSummary').innerHTML=`<div class="loading">汇总加载失败：${escapeHtml(JSON.stringify(data))}</div>`;return;}const s=data.summary||{};document.getElementById('reviewSummary').innerHTML=`<div class="progress"><div>Total: <strong>${s.total||0}</strong> · Manual: <strong>${s.needs_manual_count||0}</strong></div><div>新增价值: <strong>${s.new_value_count||0}</strong> · 已有记忆重复: <strong>${s.existing_duplicate_count||s.duplicate_count||0}</strong></div><div>Duplicates: ${s.duplicate_count||0} · Conflicts: ${s.conflict_count||0} · Low score: ${s.low_score_count||0}</div><div>Value: ${escapeHtml(JSON.stringify(s.by_value_class||{}))}</div><div>Actions: ${escapeHtml(JSON.stringify(s.by_suggested_action||{}))}</div><div>Evidence: ${escapeHtml(JSON.stringify(s.by_evidence_quality||{}))}</div><div>Score: ${escapeHtml(String(s.score_min??'-'))}–${escapeHtml(String(s.score_max??'-'))} avg ${escapeHtml(String(s.score_avg??'-'))}</div></div>`;}
 async function loadTrace(){if(!selectedRunId)return;const candidateQuery=selected?`?candidate_id=${encodeURIComponent(selected.id)}`:'';const res=await fetch(`/api/memory/runs/${selectedRunId}/trace${candidateQuery}`);const data=await res.json();document.getElementById('trace').textContent=JSON.stringify(data.trace||[],null,2);}
 async function loadCandidates(){const res=await fetch('/api/memory/candidates');const data=await res.json();candidates=data.candidates||[];renderList();}
-function groupCandidates(items){return items.reduce((groups,candidate)=>{const key=candidate.status||'unknown';if(!groups[key])groups[key]=[];groups[key].push(candidate);return groups;},{});}
-function candidateHtml(c){const conflictCount=(c.conflicts||[]).length;const conflict=conflictCount?`<span class="pill red">conflicts ${conflictCount}</span>`:'';const suggestion=c.suggested_action?`<span class="pill amber">${escapeHtml(c.suggested_action)}</span>`:'';const score=c.score==null?'-':c.score;return `<button class="candidate-card ${selected&&selected.id===c.id?'active':''}" onclick="selectCandidate(${jsArg(c.id)})"><header><strong>${escapeHtml(c.type||'memory')}</strong><span class="pill ${statusTone(c.status)}">${escapeHtml(c.status||'unknown')}</span></header><p class="candidate-content">${escapeHtml(truncate(c.content||'',150))}</p><div class="candidate-footer"><span class="pill blue">${escapeHtml(c.scope||'scope')}</span><span class="pill">score ${escapeHtml(String(score))}</span>${suggestion}${conflict}</div></button>`;}
-function renderList(){const q=document.getElementById('search').value.toLowerCase();const sf=document.getElementById('statusFilter').value;const scf=document.getElementById('scopeFilter').value;const list=document.getElementById('list');const filtered=candidates.filter(c=>(!sf||c.status===sf)&&(!scf||c.scope===scf)&&(!q||JSON.stringify(c).toLowerCase().includes(q)));updateStats(filtered);const groups=groupCandidates(filtered);const order=['promote','review','reject','unknown'];const html=order.filter(key=>groups[key]&&groups[key].length).map(key=>`<div class="group-title">${escapeHtml(key)} (${groups[key].length})</div>`+groups[key].map(candidateHtml).join('')).join('');list.innerHTML=html||'<div class="empty-state">没有匹配的候选项</div>';}
+function valueClass(c){const q=c.quality_signals||{};if(q.value_class)return q.value_class;if(q.duplicate)return'existing_duplicate';if(q.matched_memory_id)return'similar_existing';return'new_value';}
+function valueLabel(value){return {new_value:'新增价值',existing_duplicate:'已有记忆重复',similar_existing:'相似可合并',unknown:'未分类'}[value]||value;}
+function valueTone(value){if(value==='new_value')return'value-new';if(value==='existing_duplicate')return'value-dup';if(value==='similar_existing')return'value-similar';return'';}
+function groupCandidates(items){return items.reduce((groups,candidate)=>{const key=valueClass(candidate)||'unknown';if(!groups[key])groups[key]=[];groups[key].push(candidate);return groups;},{});}
+function candidateHtml(c){const q=c.quality_signals||{};const vc=valueClass(c);const conflictCount=(c.conflicts||[]).length;const conflict=conflictCount?`<span class="pill red">conflicts ${conflictCount}</span>`:'';const suggestion=c.suggested_action?`<span class="pill amber">${escapeHtml(c.suggested_action)}</span>`:'';const matched=q.matched_memory_summary?`<p class="match-note">已有：${escapeHtml(truncate(q.matched_memory_summary,88))}</p>`:'';const score=c.score==null?'-':c.score;return `<button class="candidate-card ${selected&&selected.id===c.id?'active':''}" onclick="selectCandidate(${jsArg(c.id)})"><header><strong>${escapeHtml(c.type||'memory')}</strong><span class="pill ${statusTone(c.status)}">${escapeHtml(c.status||'unknown')}</span></header><p class="candidate-content">${escapeHtml(truncate(c.content||'',150))}</p>${matched}<div class="candidate-footer"><span class="pill ${valueTone(vc)}">${escapeHtml(valueLabel(vc))}</span><span class="pill blue">${escapeHtml(c.scope||'scope')}</span><span class="pill">score ${escapeHtml(String(score))}</span>${suggestion}${conflict}</div></button>`;}
+function renderList(){const q=document.getElementById('search').value.toLowerCase();const vf=document.getElementById('valueFilter').value;const sf=document.getElementById('statusFilter').value;const scf=document.getElementById('scopeFilter').value;const list=document.getElementById('list');const filtered=candidates.filter(c=>(!vf||valueClass(c)===vf)&&(!sf||c.status===sf)&&(!scf||c.scope===scf)&&(!q||JSON.stringify(c).toLowerCase().includes(q)));updateStats(filtered);const groups=groupCandidates(filtered);const order=['new_value','similar_existing','existing_duplicate','unknown'];const html=order.filter(key=>groups[key]&&groups[key].length).map(key=>`<div class="group-title">${escapeHtml(valueLabel(key))} (${groups[key].length})</div>`+groups[key].map(candidateHtml).join('')).join('');list.innerHTML=html||'<div class="empty-state">没有匹配的候选项</div>';}
 async function selectCandidate(id){selected=candidates.find(c=>c.id===id);syncDetail();await loadTrace();renderList();}
-function syncDetail(){const hasSelection=Boolean(selected);document.getElementById('emptyDetail').hidden=hasSelection;document.getElementById('detailContent').hidden=!hasSelection;if(!selected){document.getElementById('title').textContent='选择一个候选项';document.getElementById('meta').innerHTML='';document.getElementById('content').value='';document.getElementById('note').value='';document.getElementById('candidateId').textContent='-';document.getElementById('suggestedAction').textContent='-';document.getElementById('evidence').textContent='';return;}document.getElementById('title').textContent=`${selected.type||'memory'} / ${selected.id}`;document.getElementById('meta').innerHTML=[selected.scope,selected.project,selected.status,selected.review_queue_status].filter(Boolean).map(value=>`<span class="pill">${escapeHtml(value)}</span>`).join('');document.getElementById('content').value=selected.content||'';document.getElementById('candidateId').textContent=selected.id||'-';document.getElementById('suggestedAction').textContent=selected.suggested_action||'-';document.getElementById('evidence').textContent=JSON.stringify({evidence:selected.evidence||[],conflicts:selected.conflicts||[]},null,2);}
+function syncDetail(){const hasSelection=Boolean(selected);document.getElementById('emptyDetail').hidden=hasSelection;document.getElementById('detailContent').hidden=!hasSelection;if(!selected){document.getElementById('title').textContent='选择一个候选项';document.getElementById('meta').innerHTML='';document.getElementById('content').value='';document.getElementById('note').value='';document.getElementById('candidateId').textContent='-';document.getElementById('suggestedAction').textContent='-';document.getElementById('dreamAnalysis').textContent='';document.getElementById('qualitySignals').textContent='';document.getElementById('evidence').textContent='';return;}const vc=valueClass(selected);document.getElementById('title').textContent=`${selected.type||'memory'} / ${selected.id}`;document.getElementById('meta').innerHTML=[`价值:${valueLabel(vc)}`,selected.scope,selected.project,selected.status,selected.review_queue_status].filter(Boolean).map(value=>`<span class="pill ${String(value).startsWith('价值:')?valueTone(vc):''}">${escapeHtml(value)}</span>`).join('');document.getElementById('content').value=selected.content||'';document.getElementById('candidateId').textContent=selected.id||'-';document.getElementById('suggestedAction').textContent=selected.suggested_action||'-';document.getElementById('dreamAnalysis').textContent=JSON.stringify(selected.dream_analysis||{},null,2);document.getElementById('qualitySignals').textContent=JSON.stringify(selected.quality_signals||{},null,2);document.getElementById('evidence').textContent=JSON.stringify({evidence:selected.evidence||[],conflicts:selected.conflicts||[]},null,2);}
 async function submitReview(action){if(!selected)return;const payload={candidate_id:selected.id,action,edited_content:document.getElementById('content').value,note:document.getElementById('note').value,reviewer:'user',candidate:selected};const url=selectedRunId?`/api/memory/runs/${selectedRunId}/review`:'/api/memory/review';const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await res.json();document.getElementById('status').textContent=res.ok?`已保存审核结果：${action}`:JSON.stringify(data);if(selectedRunId)await loadReviewProgress();await loadTrace();}
+function autoReviewRequest(){return{min_score:Number(document.getElementById('autoReviewMinScore').value||0.7),include_duplicates:document.getElementById('autoReviewIncludeDuplicates').checked,include_merges:document.getElementById('autoReviewIncludeMerges').checked,force:document.getElementById('autoReviewForce').checked};}
+function renderAutoReviewPreview(data){const reasons=data.skip_reasons||{};const reasonHtml=Object.keys(reasons).sort().map(key=>`<div>${escapeHtml(key)}: <strong>${escapeHtml(String(reasons[key]))}</strong></div>`).join('')||'<div>无跳过项</div>';const rows=(data.preview||[]).slice(0,6).map(row=>`<div class="run-card"><span class="run-id">${escapeHtml(row.candidate_id||'-')}</span><span>${escapeHtml(row.decision||'-')} · ${escapeHtml(row.reason||'-')} · score ${escapeHtml(String(row.dream_score??'-'))}</span></div>`).join('');document.getElementById('autoReviewPreview').innerHTML=`<div class="progress"><div>Decisions: <strong>${data.decision_count||0}</strong> · Skipped: <strong>${data.skipped||0}</strong></div>${reasonHtml}${rows}</div>`;}
+async function previewAutoReview(){if(!selectedRunId){document.getElementById('autoReviewPreview').innerHTML='<div class="loading">请先选择 run</div>';return;}const res=await fetch(`/api/memory/runs/${selectedRunId}/auto-review/preview`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(autoReviewRequest())});const data=await res.json();if(!res.ok){document.getElementById('autoReviewPreview').innerHTML=`<div class="loading">预览失败：${escapeHtml(JSON.stringify(data))}</div>`;return;}renderAutoReviewPreview(data);}
+async function applyAutoReview(){if(!selectedRunId){document.getElementById('autoReviewPreview').innerHTML='<div class="loading">请先选择 run</div>';return;}const res=await fetch(`/api/memory/runs/${selectedRunId}/auto-review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(autoReviewRequest())});const data=await res.json();if(!res.ok){document.getElementById('autoReviewPreview').innerHTML=`<div class="loading">写入失败：${escapeHtml(JSON.stringify(data))}</div>`;return;}renderAutoReviewPreview(data);await loadReviewProgress();await loadTrace();}
 async function resumeSelectedRun(){if(!selectedRunId)return;const res=await fetch(`/api/memory/runs/${selectedRunId}/resume`,{method:'POST'});const data=await res.json();document.getElementById('status').textContent=res.ok?`已恢复并应用：${data.status}`:JSON.stringify(data);await loadRuns();await loadTrace();}
 function updateStats(items){const counts=items.reduce((acc,item)=>{acc[item.status||'unknown']=(acc[item.status||'unknown']||0)+1;return acc;},{});document.getElementById('totalCount').textContent=items.length;document.getElementById('reviewCount').textContent=counts.review||0;document.getElementById('promoteCount').textContent=counts.promote||0;document.getElementById('rejectCount').textContent=counts.reject||0;const runLabel=selectedRunId?` &middot; ${selectedRunId}`:'';document.getElementById('queueSummary').innerHTML=`${items.length} 条候选项${runLabel}`;}
 function statusTone(status){if(status==='promote')return'green';if(status==='review')return'amber';if(status==='reject')return'red';return'';}
@@ -410,7 +433,7 @@ function truncate(text,limit){const value=String(text||'');return value.length>l
 function formatDate(value){if(!value)return'';const date=new Date(value);if(Number.isNaN(date.getTime()))return value;return date.toLocaleString('zh-CN',{hour12:false});}
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
 function jsArg(value){return escapeHtml(JSON.stringify(String(value||'')));}
-['search','statusFilter','scopeFilter'].forEach(id=>document.addEventListener('input',e=>{if(e.target&&e.target.id===id)renderList();}));
+['search','valueFilter','statusFilter','scopeFilter'].forEach(id=>document.addEventListener('input',e=>{if(e.target&&e.target.id===id)renderList();}));
 loadStartDefaults();loadRuns();loadCandidates();setInterval(loadRuns,3000);
 </script>
 </body>
@@ -510,9 +533,100 @@ def _resume_namespace(run_id: str, reviewed: str | None, memory_cards: str | Non
     return Namespace(run_id=run_id, reviewed=reviewed, memory_cards=memory_cards, reviewer="user", output_dir=str(memory_dir))
 
 
+def _auto_review_namespace(run_id: str, request: MemoryAutoReviewRequest, memory_dir: Path, *, dry_run: bool) -> Namespace:
+    return Namespace(
+        run_id=run_id,
+        output_dir=str(memory_dir),
+        reviewer=request.reviewer,
+        min_score=float(request.min_score),
+        review_queue=None,
+        reviewed_output=None,
+        keep_review=bool(request.keep_review),
+        include_duplicates=bool(request.include_duplicates),
+        include_merges=bool(request.include_merges),
+        force=bool(request.force),
+        dry_run=dry_run,
+    )
+
+
+def _auto_review_preview_from_queue(queue: list[dict[str, Any]], payload: dict[str, Any], request: MemoryAutoReviewRequest) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    min_score = float(payload.get("min_score") or 0.0)
+    include_duplicates = bool(request.include_duplicates)
+    include_merges = bool(request.include_merges)
+    keep_review = bool(request.keep_review)
+    for item in queue:
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
+        quality = item.get("quality_signals") if isinstance(item.get("quality_signals"), dict) else {}
+        try:
+            score_value = float(analysis.get("dream_score") or 0.0)
+        except (TypeError, ValueError):
+            score_value = 0.0
+        suggested = str(item.get("suggested_action") or analysis.get("suggested_action") or "review")
+        decision = "skip"
+        reason = "requires_manual_review"
+        if not candidate:
+            reason = "missing_candidate"
+        elif quality.get("duplicate") and not include_duplicates:
+            reason = "duplicate"
+        elif suggested in {"create", "merge"} and score_value < min_score:
+            reason = "below_min_score"
+        elif suggested == "create":
+            decision = "approved"
+            reason = "meets_min_score"
+        elif suggested == "merge":
+            if include_merges:
+                decision = "merged"
+                reason = "include_merges"
+            else:
+                reason = "merge_requires_explicit_include"
+        elif suggested == "reject":
+            decision = "rejected"
+            reason = "suggested_reject"
+        elif suggested == "needs_more_evidence" and not keep_review:
+            decision = "needs_more_evidence"
+            reason = "needs_more_evidence"
+        elif suggested in {"review", "needs_more_evidence"}:
+            reason = "requires_manual_review"
+        else:
+            reason = "unhandled_action"
+        rows.append({
+            "candidate_id": item.get("candidate_id") or candidate.get("id"),
+            "content": candidate.get("content"),
+            "type": candidate.get("type"),
+            "scope": candidate.get("scope"),
+            "suggested_action": suggested,
+            "decision": decision,
+            "reason": reason,
+            "dream_score": score_value,
+            "duplicate": bool(quality.get("duplicate")),
+            "evidence_quality": quality.get("evidence_quality"),
+        })
+    return rows
+
+
 def _review_progress(state: dict[str, Any]) -> dict[str, Any]:
-    candidates_path = Path(str(state.get("artifacts", {}).get("candidates_path") or ""))
+    artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
+    queue_path = Path(str(artifacts.get("review_queue_path") or ""))
+    candidates_path = Path(str(artifacts.get("candidates_path") or ""))
+    queue_items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
     candidates = _read_jsonl_dicts(candidates_path) if candidates_path.is_file() else []
+    source_items = queue_items or candidates
+    source = "review_queue" if queue_items else "candidates"
+    candidate_ids: list[str] = []
+    suggested_actions: dict[str, int] = {}
+    statuses: dict[str, int] = {}
+    for item in source_items:
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else item
+        candidate_id = str(item.get("candidate_id") or candidate.get("id") or "")
+        if candidate_id:
+            candidate_ids.append(candidate_id)
+        analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
+        suggested = str(item.get("suggested_action") or analysis.get("suggested_action") or "unknown")
+        suggested_actions[suggested] = suggested_actions.get(suggested, 0) + 1
+        status = str(item.get("status") or candidate.get("status") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
     reviewed_path = Path(str(state["run_dir"])) / "reviewed.jsonl"
     reviewed = _read_jsonl_dicts(reviewed_path)
     reviewed_ids = {str(row.get("candidate_id")) for row in reviewed if row.get("candidate_id")}
@@ -520,12 +634,17 @@ def _review_progress(state: dict[str, Any]) -> dict[str, Any]:
     for row in reviewed:
         action = str(row.get("action") or row.get("status") or "unknown")
         actions[action] = actions.get(action, 0) + 1
+    pending_ids = [candidate_id for candidate_id in candidate_ids if candidate_id not in reviewed_ids]
     return {
         "run_id": state["run_id"],
-        "total": len(candidates),
-        "reviewed": len(reviewed_ids),
-        "pending": max(0, len(candidates) - len(reviewed_ids)),
+        "source": source,
+        "total": len(candidate_ids),
+        "reviewed": len(reviewed_ids & set(candidate_ids)),
+        "pending": len(pending_ids),
+        "pending_ids": pending_ids[:20],
         "actions": actions,
+        "suggested_actions": dict(sorted(suggested_actions.items())),
+        "statuses": dict(sorted(statuses.items())),
     }
 
 
@@ -545,6 +664,64 @@ def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
             if isinstance(payload, dict):
                 rows.append(payload)
     return rows
+
+
+def _review_queue_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    def bump(bucket: dict[str, int], key: object) -> None:
+        name = str(key or "unknown")
+        bucket[name] = bucket.get(name, 0) + 1
+
+    by_status: dict[str, int] = {}
+    by_suggested_action: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    by_scope: dict[str, int] = {}
+    by_evidence_quality: dict[str, int] = {}
+    by_value_class: dict[str, int] = {}
+    duplicate_count = 0
+    conflict_count = 0
+    low_score_count = 0
+    needs_manual_count = 0
+    scores: list[float] = []
+    for item in items:
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
+        quality = item.get("quality_signals") if isinstance(item.get("quality_signals"), dict) else {}
+        action = str(item.get("suggested_action") or analysis.get("suggested_action") or "unknown")
+        bump(by_status, item.get("status") or candidate.get("status"))
+        bump(by_suggested_action, action)
+        bump(by_type, candidate.get("type"))
+        bump(by_scope, candidate.get("scope"))
+        value_class = str(quality.get("value_class") or ("existing_duplicate" if quality.get("duplicate") else "similar_existing" if quality.get("matched_memory_id") else "new_value"))
+        bump(by_evidence_quality, quality.get("evidence_quality"))
+        bump(by_value_class, value_class)
+        duplicate_count += 1 if quality.get("duplicate") else 0
+        conflict_count += len(item.get("conflicts") or []) if isinstance(item.get("conflicts"), list) else 0
+        needs_manual_count += 1 if action in {"review", "needs_more_evidence"} else 0
+        try:
+            score = float(analysis.get("dream_score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        scores.append(score)
+        if action in {"create", "merge"} and score < 0.7:
+            low_score_count += 1
+    return {
+        "total": len(items),
+        "by_status": dict(sorted(by_status.items())),
+        "by_suggested_action": dict(sorted(by_suggested_action.items())),
+        "by_type": dict(sorted(by_type.items())),
+        "by_scope": dict(sorted(by_scope.items())),
+        "by_evidence_quality": dict(sorted(by_evidence_quality.items())),
+        "by_value_class": dict(sorted(by_value_class.items())),
+        "new_value_count": by_value_class.get("new_value", 0),
+        "existing_duplicate_count": by_value_class.get("existing_duplicate", 0),
+        "duplicate_count": duplicate_count,
+        "conflict_count": conflict_count,
+        "low_score_count": low_score_count,
+        "needs_manual_count": needs_manual_count,
+        "score_min": round(min(scores), 4) if scores else None,
+        "score_max": round(max(scores), 4) if scores else None,
+        "score_avg": round(sum(scores) / len(scores), 4) if scores else None,
+    }
 
 
 def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_dir: Path | str = ".dream-memory") -> FastAPI:
@@ -676,6 +853,16 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
         return {"run_id": run_id, "count": len(items), "items": items}
 
+    @app.get("/api/memory/runs/{run_id}/review-summary")
+    def memory_run_review_summary(run_id: str) -> dict[str, Any]:
+        try:
+            state = load_run_state(memory_dir, run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
+        items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        return {"run_id": run_id, "summary": _review_queue_summary(items)}
+
     @app.get("/api/memory/runs/{run_id}/review-progress")
     def memory_run_review_progress(run_id: str) -> dict[str, Any]:
         try:
@@ -721,6 +908,38 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         append_trace(state, "review_recorded", {"candidate_id": request.candidate_id, "action": request.action, "reviewed_path": str(reviewed_path)})
         return {"ok": True, "run_id": run_id, "reviewed_path": str(reviewed_path), "review": payload, "progress": _review_progress(state)}
+
+    @app.post("/api/memory/runs/{run_id}/auto-review/preview")
+    def memory_run_auto_review_preview(run_id: str, request: MemoryAutoReviewRequest) -> dict[str, Any]:
+        config = _web_config(memory_dir)
+        args = _auto_review_namespace(run_id, request, memory_dir, dry_run=True)
+        try:
+            state = load_run_state(memory_dir, run_id)
+            payload = _auto_review_run(args=args, config=config)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
+        queue = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        payload["preview"] = _auto_review_preview_from_queue(queue, payload, request)
+        return payload
+
+    @app.post("/api/memory/runs/{run_id}/auto-review")
+    def memory_run_auto_review_apply(run_id: str, request: MemoryAutoReviewRequest) -> dict[str, Any]:
+        config = _web_config(memory_dir)
+        args = _auto_review_namespace(run_id, request, memory_dir, dry_run=False)
+        try:
+            state = load_run_state(memory_dir, run_id)
+            payload = _auto_review_run(args=args, config=config)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
+        queue = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        payload["preview"] = _auto_review_preview_from_queue(queue, payload, request)
+        return payload
 
     @app.post("/api/memory/runs/{run_id}/resume")
     def memory_run_resume(run_id: str) -> dict[str, Any]:

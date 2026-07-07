@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from dream_memory.memory_cli import build_parser, main
 from dream_memory.model_providers import ModelRuntimeResult
+from dream_memory.memory_runs import create_run_state, update_run_state
 
 
 class MemoryCliTests(unittest.TestCase):
@@ -61,6 +62,43 @@ class MemoryCliTests(unittest.TestCase):
             self.assertIn("codex", text)
             self.assertIn("claude_code", text)
 
+
+    def test_import_all_includes_local_project_instruction_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / ".codex"; codex.mkdir()
+            claude = root / ".claude"; claude.mkdir()
+            project = root / "project"; project.mkdir()
+            (project / "AGENTS.md").write_text("如果后端使用的是 Python，则使用 uv 进行包管理\n前端使用 pnpm 进行管理", encoding="utf-8")
+            out_dir = root / "imports"
+
+            exit_code = main(["import", "all", "--codex-home", str(codex), "--claude-home", str(claude), "--project", str(project), "--output-dir", str(out_dir), "--dry-run"])
+
+            self.assertEqual(exit_code, 0)
+            text = (out_dir / "all-events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("project_instruction", text)
+            self.assertIn("uv 进行包管理", text)
+            self.assertTrue((out_dir / "project-instructions-events.jsonl").exists())
+
+
+    def test_import_all_includes_project_marker_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / ".codex"; codex.mkdir()
+            claude = root / ".claude"; claude.mkdir()
+            project = root / "project"; project.mkdir()
+            (project / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+            (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+            out_dir = root / "imports"
+
+            exit_code = main(["import", "all", "--codex-home", str(codex), "--claude-home", str(claude), "--project", str(project), "--output-dir", str(out_dir), "--dry-run"])
+
+            self.assertEqual(exit_code, 0)
+            text = (out_dir / "all-events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("project_markers", text)
+            self.assertIn("python_package_manager=uv", text)
+            self.assertTrue((out_dir / "project-marker-events.jsonl").exists())
+
     def test_dream_agent_without_invoke_writes_prompt_only_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -99,6 +137,33 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "facts.jsonl").exists())
 
+    def test_review_summary_cli_groups_run_review_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "create_1", "suggested_action": "create", "status": "promote", "candidate": {"id": "create_1", "type": "workflow", "scope": "user", "content": "高分", "evidence": [{"event_id": "event_1"}]}, "quality_signals": {"evidence_quality": "multi_event"}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "review_1", "suggested_action": "review", "status": "review", "candidate": {"id": "review_1", "type": "preference", "scope": "user", "content": "人工", "evidence": [{"event_id": "event_2"}]}, "quality_signals": {"duplicate": True, "evidence_quality": "single_event"}, "dream_analysis": {"dream_score": 0.55}, "conflicts": [{"memory_id": "mem_1"}]}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            with patch("sys.stdout", new_callable=lambda: __import__('io').StringIO()) as stdout:
+                exit_code = main(["--config", str(config_path), "review-summary", "--run-id", state["run_id"]])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["run_id"], state["run_id"])
+            self.assertEqual(payload["total"], 2)
+            self.assertEqual(payload["by_suggested_action"], {"create": 1, "review": 1})
+            self.assertEqual(payload["by_type"], {"preference": 1, "workflow": 1})
+            self.assertEqual(payload["duplicate_count"], 1)
+            self.assertEqual(payload["conflict_count"], 1)
+            self.assertEqual(payload["needs_manual_count"], 1)
+
     def test_review_cli_writes_review_queue_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -132,6 +197,193 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "review_queue.jsonl").exists())
+
+    def test_auto_review_cli_writes_reviewed_decisions_for_run_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "create_1", "suggested_action": "create", "candidate": {"id": "create_1", "type": "preference", "scope": "user", "content": "用户偏好中文回答。", "evidence": [{"event_id": "event_1"}], "tags": ["language"]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "reject_1", "suggested_action": "reject", "candidate": {"id": "reject_1", "type": "requirement", "scope": "project", "project": str(root), "content": "删除这个按钮", "evidence": [{"event_id": "event_2"}], "tags": ["task"]}, "dream_analysis": {"dream_score": 0.32}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "review_1", "suggested_action": "review", "candidate": {"id": "review_1", "type": "workflow", "scope": "user", "content": "需要人工判断。", "evidence": [{"event_id": "event_3"}]}, "dream_analysis": {"dream_score": 0.62}}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--min-score", "0.7"])
+
+            self.assertEqual(exit_code, 0)
+            reviewed_path = run_dir / "reviewed.jsonl"
+            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["action"] for row in rows], ["approved", "rejected"])
+            updated = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(updated["counts"]["auto_review_count"], 2)
+            self.assertIn("auto_reviewed", (run_dir / "trace.jsonl").read_text(encoding="utf-8"))
+
+    def test_auto_review_cli_skips_merges_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({
+                "candidate_id": "merge_1",
+                "suggested_action": "merge",
+                "candidate": {"id": "merge_1", "type": "preference", "scope": "user", "content": "用户偏好直接推进。", "evidence": [{"event_id": "event_1"}], "tags": ["autonomy"]},
+                "quality_signals": {"matched_memory_id": "mem_existing", "similarity": 0.5},
+                "dream_analysis": {"dream_score": 0.82},
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"]])
+
+            self.assertEqual(exit_code, 0)
+            reviewed_path = run_dir / "reviewed.jsonl"
+            self.assertEqual(reviewed_path.read_text(encoding="utf-8"), "")
+
+            exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--include-merges", "--force"])
+
+            self.assertEqual(exit_code, 0)
+            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["action"], "merged")
+
+    def test_auto_review_cli_skips_duplicates_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({
+                "candidate_id": "dup_1",
+                "suggested_action": "reject",
+                "candidate": {"id": "dup_1", "type": "preference", "scope": "user", "content": "用户偏好中文回答。", "evidence": [{"event_id": "event_1"}], "tags": ["language"]},
+                "quality_signals": {"duplicate": True, "matched_memory_id": "mem_existing"},
+                "dream_analysis": {"dream_score": 0.8},
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"]])
+
+            self.assertEqual(exit_code, 0)
+            reviewed_path = run_dir / "reviewed.jsonl"
+            self.assertEqual(reviewed_path.read_text(encoding="utf-8"), "")
+            updated = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(updated["counts"]["auto_review_count"], 0)
+            trace = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"duplicate_skipped": 1', trace)
+
+            exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--include-duplicates", "--force"])
+
+            self.assertEqual(exit_code, 0)
+            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["action"], "rejected")
+
+    def test_auto_review_cli_dry_run_ignores_existing_reviewed_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({"candidate_id": "cand_1", "suggested_action": "create", "candidate": {"id": "cand_1", "type": "workflow", "scope": "user", "content": "用户偏好直接推进。", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            reviewed_path = run_dir / "reviewed.jsonl"
+            reviewed_path.write_text(json.dumps({"candidate_id": "manual", "action": "approved"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            with patch("sys.stdout", new_callable=lambda: __import__('io').StringIO()) as stdout:
+                exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--dry-run"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["decision_count"], 1)
+            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["candidate_id"], "manual")
+
+    def test_auto_review_cli_dry_run_reports_without_writing_or_mutating_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({"candidate_id": "cand_1", "suggested_action": "create", "candidate": {"id": "cand_1", "type": "workflow", "scope": "user", "content": "用户偏好直接推进。", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            before_state = (run_dir / "state.json").read_text(encoding="utf-8")
+
+            with patch("sys.stdout", new_callable=lambda: __import__('io').StringIO()) as stdout:
+                exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--dry-run"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["decision_count"], 1)
+            self.assertFalse((run_dir / "reviewed.jsonl").exists())
+            self.assertEqual((run_dir / "state.json").read_text(encoding="utf-8"), before_state)
+
+    def test_auto_review_cli_reports_skip_reasons_for_review_and_low_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            memory_dir = root / "memory"
+            config_path.write_text(json.dumps({"models": {"primary": {"provider": "anthropic", "model": "test", "api_key": "key"}}, "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]}, "output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path=str(root / "events.jsonl"), mode="rules", model="test", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "low", "suggested_action": "create", "candidate": {"id": "low", "type": "workflow", "scope": "user", "content": "低分候选", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.4}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "review", "suggested_action": "review", "candidate": {"id": "review", "type": "workflow", "scope": "user", "content": "需要人工判断", "evidence": [{"event_id": "event_2"}]}, "dream_analysis": {"dream_score": 0.65}}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            with patch("sys.stdout", new_callable=lambda: __import__('io').StringIO()) as stdout:
+                exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--min-score", "0.7"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["skipped"], 2)
+            self.assertEqual(payload["skip_reasons"]["below_min_score"], 1)
+            self.assertEqual(payload["skip_reasons"]["requires_manual_review"], 1)
+
+    def test_auto_review_cli_refuses_to_overwrite_existing_reviewed_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+            state = create_run_state(memory_dir=memory_dir, project=str(root), input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({"candidate_id": "cand_1", "suggested_action": "create", "candidate": {"id": "cand_1", "type": "preference", "scope": "user", "content": "用户偏好中文回答。", "evidence": [{"event_id": "event_1"}], "tags": ["language"]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            reviewed_path = run_dir / "reviewed.jsonl"
+            reviewed_path.write_text(json.dumps({"candidate_id": "manual", "action": "approved"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+
+            with self.assertRaises(FileExistsError):
+                main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"]])
+
+            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["candidate_id"], "manual")
+
+            exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--force"])
+
+            self.assertEqual(exit_code, 0)
+            overwritten = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(overwritten[0]["candidate_id"], "cand_1")
 
     def test_apply_cli_writes_memory_cards_and_memory_md(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,6 +595,28 @@ class MemoryCliTests(unittest.TestCase):
             self.assertTrue(Path(state["artifacts"]["events_path"]).exists())
             self.assertTrue(Path(state["artifacts"]["review_queue_path"]).exists())
             self.assertTrue((Path(state["run_dir"]) / "trace.jsonl").exists())
+
+    def test_run_cli_marks_persistent_run_failed_when_extraction_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_path = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events_path.write_text(json.dumps({"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "project": str(root), "content": "记住这个偏好"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({"invoke_model": True, "output_dir": str(memory_dir)}, ensure_ascii=False), encoding="utf-8")
+
+            with patch("dream_memory.memory_cli.agent_extract_memory_candidates", side_effect=RuntimeError("provider 403")):
+                with self.assertRaises(RuntimeError):
+                    main(["--config", str(config_path), "run", "--input", str(events_path), "--project", str(root)])
+
+            state_path = next((memory_dir / "runs").glob("*/state.json"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["phase"], "failed")
+            self.assertIn("provider 403", state["error"])
+            trace = (Path(state["run_dir"]) / "trace.jsonl").read_text(encoding="utf-8")
+            self.assertIn("run_failed", trace)
+            self.assertIn("RuntimeError", trace)
 
     def test_status_cli_reads_run_state_and_lists_runs(self):
         with tempfile.TemporaryDirectory() as tmp:

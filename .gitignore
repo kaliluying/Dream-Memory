@@ -9,3 +9,5 @@ __pycache__/
 outputs/
 .dream-memory/*
 !.dream-memory/.gitkeep
+AGENTS.md
+CLAUDE.md

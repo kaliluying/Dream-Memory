@@ -12,9 +12,10 @@ AI 抽取路径由 LangGraph 状态图编排：`build_prompt -> invoke_model -> 
 - 保留规则模式作为 fallback/debug：`--mode rules`
 - 对候选记忆做安全过滤、schema 校验、证据校验和去重
 - 通过 review queue 进行人工审核
+- 支持 auto-review 预览/草稿生成，并输出 skip reasons 解释为什么跳过
 - 将审核后的正式记忆写入 `memory_cards.jsonl`
 - 派生生成可读的 `MEMORY.md`
-- 按项目生成 AI 可用上下文
+- 按项目生成 AI 可用上下文，并返回 relevance diagnostics 解释召回原因
 - 提供 FastAPI 审核页面 `/memory-review`
 
 ## 安装与运行
@@ -153,8 +154,8 @@ uv run dream-memory review   --candidates .dream-memory/ai-candidates.jsonl   --
 # 7. 应用人工审核结果
 uv run dream-memory apply   --reviewed .dream-memory/reviewed.jsonl   --memory-cards .dream-memory/memory_cards.jsonl   --output-dir .dream-memory   --reviewer user
 
-# 8. 生成 AI 上下文
-uv run dream-memory context   --project .   --memory-cards .dream-memory/memory_cards.jsonl   --limit 12   --format markdown
+# 8. 生成 AI 上下文；--task 会按任务意图重排并输出 diagnostics
+uv run dream-memory context   --project .   --memory-cards .dream-memory/memory_cards.jsonl   --limit 12   --format markdown   --task "跑测试并验证"
 ```
 
 ## 一键流程
@@ -182,6 +183,18 @@ uv run dream-memory status
 # 查看单个 run
 uv run dream-memory status --run-id <run_id>
 
+# 可选：先看候选分布，判断这批队列是否值得逐条审核
+uv run dream-memory review-summary --run-id <run_id>
+
+# 可选：先预览自动审核影响，不写 reviewed.jsonl、不改 run state
+uv run dream-memory auto-review --run-id <run_id> --min-score 0.7 --dry-run
+# 按规则自动生成高置信 reviewed 草稿；输出 approved/rejected/skipped/skip_reasons
+uv run dream-memory auto-review --run-id <run_id> --min-score 0.7
+# 如果 reviewed.jsonl 已存在，auto-review 默认拒绝覆盖；确认要重写时添加 --force
+# 默认跳过重复候选；如需写入重复候选的 rejected 决策，添加 --include-duplicates
+# 默认跳过 merge 候选，避免自动覆盖既有记忆；确认要自动合并时添加 --include-merges
+# skip_reasons 会解释跳过原因，例如 duplicate / below_min_score / requires_manual_review / merge_requires_explicit_include
+
 # 人工审核后恢复并 apply
 uv run dream-memory resume --run-id <run_id>
 
@@ -200,11 +213,26 @@ Web API 也支持 run 状态查询：
 - `GET /api/memory/runs/{run_id}/candidates`
 - `GET /api/memory/runs/{run_id}/review-queue`
 - `GET /api/memory/runs/{run_id}/review-progress`
+- `GET /api/memory/runs/{run_id}/review-summary`
 - `POST /api/memory/runs/{run_id}/review`
+- `POST /api/memory/runs/{run_id}/auto-review/preview`
+- `POST /api/memory/runs/{run_id}/auto-review`
 
 
-Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 run 后会优先读取该 run 的 `review_queue.jsonl`，展示候选记忆、冲突信息、审核建议、审核进度和 trace。候选会按状态分组，审核结果会写入 run 专属的 `reviewed.jsonl`。Web API 也提供 `POST /api/memory/runs/start` 用于启动 run，`POST /api/memory/runs/{run_id}/resume` 用于审核后恢复并应用正式记忆。
+Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 run 后会优先读取该 run 的 `review_queue.jsonl`，展示候选记忆、冲突信息、审核建议、审核进度、候选汇总、Dream Analysis、Quality Signals 和 trace。候选会按状态分组；候选汇总会按 suggested action、类型、scope、证据质量、重复数、冲突数、低分数和分数区间给出总览，便于先判断这批候选是否值得逐条审核。审核结果会写入 run 专属的 `reviewed.jsonl`。页面内置自动审核预览：可以先查看将批准/跳过的候选、skip reasons、分数和原因；只有点击写入 reviewed 才会落盘，且默认不覆盖已有 `reviewed.jsonl`，需要勾选覆盖才会重写。Web API 也提供 `POST /api/memory/runs/start` 用于启动 run，`POST /api/memory/runs/{run_id}/resume` 用于审核后恢复并应用正式记忆。
 
+
+## 上下文召回诊断
+
+`context` 会在 JSON 输出中附带 `diagnostics`，用于解释每条记忆为什么被排到前面：
+
+- `relevance`：最终相关性分数
+- `token_score`：任务文本和记忆文本的直接 token overlap
+- `intent_score`：短指令/意图别名命中的 boost，例如“跑测试”命中 pytest 流程
+- `matched_tokens`：直接命中的 token
+- `reason`：排序原因，常见值包括 `intent_alias_match`、`token_overlap`、`scope_fallback`、`default_scope_order`
+
+Markdown 输出会在每条记忆后追加 `rank_reason` 和 `relevance`，方便后续 agent 判断当前上下文是否召回正确。
 
 ## 导出给 Codex / Claude Code
 
@@ -240,7 +268,7 @@ uv run dream-memory summary --scope all-projects --output .dream-memory/PROJECTS
 - `ai-candidates.jsonl`：AI 候选记忆
 - `candidates.jsonl`：规则 fallback 候选记忆
 - `review_queue.jsonl`：待人工审核队列
-- `reviewed.jsonl`：Web/人工审核提交
+- `reviewed.jsonl`：Web/人工审核提交，也可由 `auto-review` 为高置信候选生成草稿；默认不会被覆盖
 - `review_decisions.jsonl`：审核决策流水账
 - `memory_cards.jsonl`：正式记忆卡片状态
 - `MEMORY.md`：正式记忆的人类可读投影
@@ -258,6 +286,14 @@ uv run uvicorn dream_memory.web:app --reload
 ```text
 http://127.0.0.1:8000/memory-review
 ```
+
+审核页左侧包含候选汇总和自动审核预览区：
+
+- 候选汇总调用 `/review-summary`，展示动作分布、类型分布、证据质量、重复/冲突/低分统计和分数区间
+- “预览”只调用 `/auto-review/preview`，不会写入文件
+- “写入 reviewed”调用 `/auto-review`，默认不覆盖已有审核文件
+- 如需覆盖已有草稿或人工审核文件，先勾选“覆盖现有 reviewed”
+- 可以勾选“包含重复项”或“包含合并项”来显式允许自动写入 duplicate / merge 类型决策
 
 ## 更多文档
 

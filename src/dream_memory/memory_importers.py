@@ -57,21 +57,232 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     return rows
 
 
+def _content_parts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            parts.extend(_content_parts(item))
+        return parts
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return [value["text"]]
+        if isinstance(value.get("content"), (str, list, dict)):
+            return _content_parts(value.get("content"))
+        if isinstance(value.get("message"), (str, list, dict)):
+            return _content_parts(value.get("message"))
+    return []
+
+
 def _message_content(obj: dict[str, Any]) -> str:
     for key in ["content", "message", "text", "body", "prompt", "response"]:
-        value = obj.get(key)
-        if isinstance(value, str):
-            return value
-    if isinstance(obj.get("content"), list):
-        parts = []
-        for item in obj["content"]:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts)
+        parts = _content_parts(obj.get(key))
+        if parts:
+            return "\n".join(part for part in parts if part.strip())
     return ""
 
+def _strip_generated_memory_block(text: str) -> str:
+    start = "<!-- DREAM_MEMORY_START -->"
+    end = "<!-- DREAM_MEMORY_END -->"
+    while start in text and end in text.split(start, 1)[1]:
+        before, rest = text.split(start, 1)
+        _, after = rest.split(end, 1)
+        text = before + after
+    return text.strip()
+
+
+def _clean_project_instruction_text(text: str) -> str:
+    text = _strip_generated_memory_block(str(text or ""))
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        if stripped in {"## Dream Memory Context", "--- project-doc ---"}:
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_project_instructions(text: str) -> str:
+    if not text.startswith("# AGENTS.md instructions"):
+        return ""
+    start_marker = "<INSTRUCTIONS>"
+    end_marker = "</INSTRUCTIONS>"
+    if start_marker not in text:
+        return ""
+    body = text.split(start_marker, 1)[1]
+    if end_marker in body:
+        body = body.split(end_marker, 1)[0]
+    return _clean_project_instruction_text(body)
+
+
+def _normalize_rollout_content(content: str, *, role: str) -> tuple[str, str]:
+    text = str(content or "").strip()
+    if not text:
+        return "", "rollout_message"
+    project_instructions = _extract_project_instructions(text)
+    if project_instructions:
+        return project_instructions, "project_instruction"
+    request_marker = "## My request for Codex:"
+    if request_marker in text:
+        return text.split(request_marker, 1)[1].strip(), "rollout_message"
+    if role == "user" and text.startswith("<environment_context>"):
+        return "", "rollout_message"
+    return text, "rollout_message"
+
+
+def _rollout_message(row: dict[str, Any]) -> tuple[str, str, str] | None:
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else None
+    if not payload:
+        return None
+    if row.get("type") != "response_item" or payload.get("type") != "message":
+        return None
+    role = str(payload.get("role") or "").strip()
+    if role not in {"user", "assistant"}:
+        return None
+    content, event_type = _normalize_rollout_content(_message_content(payload), role=role)
+    if not content:
+        return None
+    return role, content, event_type
+
+
+
+
+def import_project_instruction_events(project_roots: Iterable[Path | str]) -> list[NormalizedSessionEvent]:
+    events: list[NormalizedSessionEvent] = []
+    seen: set[str] = set()
+    for raw_root in project_roots:
+        root = Path(raw_root).expanduser()
+        root_key = str(root.absolute())
+        if root_key in seen:
+            continue
+        seen.add(root_key)
+        for filename, target in [("AGENTS.md", "codex"), ("CLAUDE.md", "claude_code")]:
+            path = root / filename
+            if not path.exists() or not path.is_file():
+                continue
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            instructions = _extract_project_instructions(content) or _clean_project_instruction_text(content)
+            if not instructions:
+                continue
+            events.append(NormalizedSessionEvent(
+                source=target,
+                session_id=f"project-instruction:{root}:{filename}",
+                project=str(root),
+                timestamp=None,
+                role="system",
+                content=instructions,
+                event_type="project_instruction",
+                metadata={"path": str(path)},
+            ))
+    return events
+
+
+def _relative_marker_paths(root: Path, filename: str, *, max_depth: int = 3) -> list[str]:
+    paths: list[str] = []
+    if not root.exists() or not root.is_dir():
+        return paths
+    for path in sorted(root.rglob(filename)):
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if len(rel.parts) > max_depth:
+            continue
+        if any(part in {".git", ".venv", "venv", "node_modules", ".dream-memory"} for part in rel.parts):
+            continue
+        paths.append(rel.as_posix())
+    return paths
+
+
+def import_project_marker_events(project_roots: Iterable[Path | str]) -> list[NormalizedSessionEvent]:
+    events: list[NormalizedSessionEvent] = []
+    seen: set[str] = set()
+    for raw_root in project_roots:
+        root = Path(raw_root).expanduser()
+        root_key = str(root.absolute())
+        if root_key in seen:
+            continue
+        seen.add(root_key)
+        pyproject_paths = _relative_marker_paths(root, "pyproject.toml")
+        uv_lock_paths = _relative_marker_paths(root, "uv.lock")
+        package_json_paths = _relative_marker_paths(root, "package.json")
+        pnpm_lock_paths = _relative_marker_paths(root, "pnpm-lock.yaml")
+        npm_lock_paths = _relative_marker_paths(root, "package-lock.json")
+        yarn_lock_paths = _relative_marker_paths(root, "yarn.lock")
+        python_test_paths = [
+            path
+            for path in _relative_marker_paths(root, "test_*.py") + _relative_marker_paths(root, "*_test.py")
+            if path.startswith("tests/") or "/tests/" in path
+        ]
+        pyproject_text = ""
+        for rel in pyproject_paths[:3]:
+            try:
+                pyproject_text += "\n" + (root / rel).read_text(encoding="utf-8", errors="ignore")[:20000]
+            except OSError:
+                pass
+        test_text = ""
+        for rel in python_test_paths[:12]:
+            try:
+                test_text += "\n" + (root / rel).read_text(encoding="utf-8", errors="ignore")[:4000]
+            except OSError:
+                pass
+        markers: list[str] = []
+        if pyproject_paths and uv_lock_paths:
+            markers.append("python_package_manager=uv")
+        elif pyproject_paths:
+            markers.append("python_project=pyproject")
+        if pnpm_lock_paths:
+            markers.append("frontend_package_manager=pnpm")
+        elif npm_lock_paths:
+            markers.append("frontend_package_manager=npm")
+        elif yarn_lock_paths:
+            markers.append("frontend_package_manager=yarn")
+        elif package_json_paths:
+            markers.append("frontend_project=package_json")
+        lower_pyproject = pyproject_text.lower()
+        lower_tests = test_text.lower()
+        if "pytest" in lower_pyproject or "import pytest" in lower_tests:
+            markers.append("python_test_runner=pytest")
+        elif "import unittest" in lower_tests or "unittest.testcase" in lower_tests:
+            markers.append("python_test_runner=unittest")
+        if "fastapi" in lower_pyproject:
+            markers.append("python_framework=fastapi")
+        elif "django" in lower_pyproject:
+            markers.append("python_framework=django")
+        if not markers:
+            continue
+        frontend_paths = sorted({
+            str(Path(path).parent.as_posix())
+            for path in package_json_paths + pnpm_lock_paths + npm_lock_paths + yarn_lock_paths
+        })
+        frontend_paths = ["." if path == "." else path for path in frontend_paths]
+        events.append(NormalizedSessionEvent(
+            source="project",
+            session_id=f"project-markers:{root}",
+            project=str(root),
+            timestamp=None,
+            role="system",
+            content="; ".join(markers),
+            event_type="project_markers",
+            metadata=redact_sensitive({
+                "pyproject_paths": pyproject_paths,
+                "uv_lock_paths": uv_lock_paths,
+                "package_json_paths": package_json_paths,
+                "pnpm_lock_paths": pnpm_lock_paths,
+                "npm_lock_paths": npm_lock_paths,
+                "yarn_lock_paths": yarn_lock_paths,
+                "python_test_paths": python_test_paths,
+                "frontend_paths": frontend_paths,
+            }),
+        ))
+    return events
 
 def write_events_jsonl(events: Iterable[NormalizedSessionEvent], path: Path | str) -> Path:
     output = Path(path).expanduser()
@@ -178,10 +389,15 @@ class CodexImporter:
                 ))
             if rollout_path.exists():
                 for row in _read_jsonl(rollout_path):
-                    content = _message_content(row)
-                    if not content:
-                        continue
-                    role = str(row.get("role") or row.get("type") or row.get("kind") or "event")
+                    rollout_message = _rollout_message(row)
+                    if rollout_message is not None:
+                        role, content, event_type = rollout_message
+                    else:
+                        content = _message_content(row)
+                        if not content:
+                            continue
+                        role = str(row.get("role") or row.get("type") or row.get("kind") or "event")
+                        event_type = "rollout_event"
                     events.append(NormalizedSessionEvent(
                         source="codex",
                         session_id=session_id,
@@ -189,7 +405,7 @@ class CodexImporter:
                         timestamp=str(row.get("timestamp") or row.get("ts") or thread.get("updated_at")),
                         role=role,
                         content=content,
-                        event_type="rollout_event",
+                        event_type=event_type,
                         metadata=redact_sensitive({"rollout_path": str(rollout_path), "thread_title": thread.get("title")}),
                     ))
         return events
@@ -206,6 +422,29 @@ class ClaudeCodeImporter:
         self.global_state_path = Path(global_state_path or Path.home() / ".claude.json").expanduser()
         self.project_roots = [Path(path).expanduser() for path in (project_roots or [])]
 
+    @property
+    def transcripts_dir(self) -> Path:
+        return self.claude_home / "transcripts"
+
+    @property
+    def projects_dir(self) -> Path:
+        return self.claude_home / "projects"
+
+    def _transcript_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        if self.transcripts_dir.exists():
+            paths.extend(sorted(self.transcripts_dir.glob("*.jsonl")))
+        if self.projects_dir.exists():
+            paths.extend(sorted(self.projects_dir.glob("*/*.jsonl")))
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for path in paths:
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                unique.append(path)
+        return unique
+
     def scan(self) -> dict[str, Any]:
         global_projects = 0
         if self.global_state_path.exists():
@@ -216,6 +455,7 @@ class ClaudeCodeImporter:
             except Exception:
                 pass
         file_history = self.claude_home / "file-history"
+        transcript_paths = self._transcript_paths()
         return {
             "source": "claude_code",
             "home": str(self.claude_home),
@@ -225,8 +465,37 @@ class ClaudeCodeImporter:
             "file_history_found": file_history.exists(),
             "file_history_project_count": len([path for path in file_history.iterdir() if path.is_dir()]) if file_history.exists() else 0,
             "project_settings_found": [str(root / ".claude" / "settings.local.json") for root in self.project_roots if (root / ".claude" / "settings.local.json").exists()],
-            "transcripts_found": False,
+            "transcripts_found": bool(transcript_paths),
+            "transcript_count": len(transcript_paths),
         }
+
+    def _import_transcript_events(self) -> list[NormalizedSessionEvent]:
+        events: list[NormalizedSessionEvent] = []
+        for path in self._transcript_paths():
+            for row in _read_jsonl(path):
+                row_type = str(row.get("type") or "")
+                if row_type not in {"user", "assistant"}:
+                    continue
+                if row.get("isSidechain") is True:
+                    continue
+                content = _message_content(row)
+                if not content or "<command-name>/init</command-name>" in content or "<command-message>init</command-message>" in content:
+                    continue
+                message = row.get("message") if isinstance(row.get("message"), dict) else {}
+                role = str(row.get("role") or message.get("role") or row_type)
+                project = row.get("cwd")
+                session_id = str(row.get("sessionId") or path.stem)
+                events.append(NormalizedSessionEvent(
+                    source="claude_code",
+                    session_id=session_id,
+                    project=str(project) if project else None,
+                    timestamp=str(row.get("timestamp")) if row.get("timestamp") is not None else None,
+                    role=role,
+                    content=content,
+                    event_type="transcript_message",
+                    metadata=redact_sensitive({"path": str(path), "uuid": row.get("uuid"), "type": row_type}),
+                ))
+        return events
 
     def import_events(self) -> list[NormalizedSessionEvent]:
         events: list[NormalizedSessionEvent] = []
@@ -277,4 +546,6 @@ class ClaudeCodeImporter:
                     event_type="project_settings",
                     metadata=redact_sensitive(metadata),
                 ))
+        events.extend(self._import_transcript_events())
         return events
+

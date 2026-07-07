@@ -504,6 +504,98 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(resume_response.json()["status"], "completed")
             self.assertTrue((memory_dir / "MEMORY.md").exists())
 
+    def test_api_memory_run_auto_review_preview_reports_skip_reasons_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "create_1", "suggested_action": "create", "candidate": {"id": "create_1", "type": "workflow", "scope": "user", "content": "用户偏好直接推进。", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "low_1", "suggested_action": "create", "candidate": {"id": "low_1", "type": "workflow", "scope": "user", "content": "低分候选", "evidence": [{"event_id": "event_2"}]}, "dream_analysis": {"dream_score": 0.4}}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review/preview", json={"min_score": 0.7})
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["decision_count"], 1)
+            self.assertEqual(payload["skip_reasons"]["below_min_score"], 1)
+            self.assertEqual(payload["preview"][0]["decision"], "approved")
+            self.assertFalse((Path(state["run_dir"]) / "reviewed.jsonl").exists())
+
+    def test_api_memory_run_auto_review_apply_refuses_existing_reviewed_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({"candidate_id": "create_1", "suggested_action": "create", "candidate": {"id": "create_1", "type": "workflow", "scope": "user", "content": "用户偏好直接推进。", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            reviewed_path = run_dir / "reviewed.jsonl"
+            reviewed_path.write_text(json.dumps({"candidate_id": "manual", "action": "approved"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review", json={"min_score": 0.7})
+
+            self.assertEqual(response.status_code, 409)
+            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["candidate_id"], "manual")
+
+            force_response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review", json={"min_score": 0.7, "force": True})
+
+            self.assertEqual(force_response.status_code, 200)
+            overwritten = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(overwritten[0]["candidate_id"], "create_1")
+
+    def test_api_memory_run_auto_review_apply_writes_reviewed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text(json.dumps({"candidate_id": "create_1", "suggested_action": "create", "candidate": {"id": "create_1", "type": "workflow", "scope": "user", "content": "用户偏好直接推进。", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review", json={"min_score": 0.7})
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertFalse(payload["dry_run"])
+            self.assertEqual(payload["decision_count"], 1)
+            rows = [json.loads(line) for line in (Path(state["run_dir"]) / "reviewed.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["action"], "approved")
+
+    def test_api_memory_run_auto_review_preview_respects_include_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "dup_1", "suggested_action": "reject", "quality_signals": {"duplicate": True}, "candidate": {"id": "dup_1", "type": "preference", "scope": "user", "content": "重复", "evidence": [{"event_id": "event_1"}]}, "dream_analysis": {"dream_score": 0.8}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "merge_1", "suggested_action": "merge", "candidate": {"id": "merge_1", "type": "workflow", "scope": "user", "content": "合并", "evidence": [{"event_id": "event_2"}]}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            default_response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review/preview", json={"min_score": 0.7})
+            include_response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review/preview", json={"min_score": 0.7, "include_duplicates": True, "include_merges": True})
+
+            self.assertEqual(default_response.status_code, 200)
+            self.assertEqual(include_response.status_code, 200)
+            default_reasons = {row["candidate_id"]: row["reason"] for row in default_response.json()["preview"]}
+            include_decisions = {row["candidate_id"]: row["decision"] for row in include_response.json()["preview"]}
+            self.assertEqual(default_reasons["dup_1"], "duplicate")
+            self.assertEqual(default_reasons["merge_1"], "merge_requires_explicit_include")
+            self.assertEqual(include_decisions["dup_1"], "rejected")
+            self.assertEqual(include_decisions["merge_1"], "merged")
+
     def test_api_memory_run_review_progress_counts_pending_and_reviewed(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
@@ -528,6 +620,34 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(payload["pending"], 1)
             self.assertEqual(payload["actions"]["approved"], 1)
 
+    def test_api_memory_run_review_progress_prefers_review_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            run_dir = Path(state["run_dir"])
+            candidates_path = run_dir / "candidates.jsonl"
+            candidates_path.write_text(json.dumps({"id": "stale", "status": "review", "type": "workflow", "content": "stale"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            queue_path = run_dir / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "cand_1", "suggested_action": "create", "status": "promote", "candidate": {"id": "cand_1", "status": "promote", "type": "workflow", "content": "候选 1"}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "cand_2", "suggested_action": "review", "status": "review", "candidate": {"id": "cand_2", "status": "review", "type": "workflow", "content": "候选 2"}}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            (run_dir / "reviewed.jsonl").write_text(json.dumps({"candidate_id": "cand_1", "action": "approved"}, ensure_ascii=False) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"candidates_path": str(candidates_path), "review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get(f"/api/memory/runs/{state['run_id']}/review-progress")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["source"], "review_queue")
+            self.assertEqual(payload["total"], 2)
+            self.assertEqual(payload["reviewed"], 1)
+            self.assertEqual(payload["pending"], 1)
+            self.assertEqual(payload["pending_ids"], ["cand_2"])
+            self.assertEqual(payload["suggested_actions"], {"create": 1, "review": 1})
+
     def test_memory_review_page_contains_grouped_candidates_and_progress_ui(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
@@ -542,6 +662,43 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertIn("loadReviewProgress", response.text)
             self.assertIn("groupCandidates", response.text)
             self.assertIn("候选分组", response.text)
+            self.assertIn("候选汇总", response.text)
+            self.assertIn("loadReviewSummary", response.text)
+            self.assertIn("review-summary", response.text)
+            self.assertIn("Dream Analysis", response.text)
+            self.assertIn("Quality Signals", response.text)
+            self.assertIn("quality_signals", response.text)
+            self.assertIn("dream_analysis", response.text)
+            self.assertIn("自动审核预览", response.text)
+            self.assertIn("previewAutoReview", response.text)
+            self.assertIn("applyAutoReview", response.text)
+            self.assertIn("autoReviewForce", response.text)
+            self.assertIn("suggested_actions", response.text)
+
+    def test_api_memory_run_review_summary_groups_queue_quality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "create_1", "suggested_action": "create", "status": "promote", "candidate": {"id": "create_1", "type": "workflow", "scope": "user", "content": "高分", "evidence": [{"event_id": "event_1"}]}, "quality_signals": {"evidence_quality": "multi_event"}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "review_1", "suggested_action": "review", "status": "review", "candidate": {"id": "review_1", "type": "preference", "scope": "user", "content": "人工", "evidence": [{"event_id": "event_2"}]}, "quality_signals": {"duplicate": True, "evidence_quality": "single_event"}, "dream_analysis": {"dream_score": 0.55}, "conflicts": [{"memory_id": "mem_1"}]}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get(f"/api/memory/runs/{state['run_id']}/review-summary")
+
+            self.assertEqual(response.status_code, 200)
+            summary = response.json()["summary"]
+            self.assertEqual(summary["total"], 2)
+            self.assertEqual(summary["by_suggested_action"], {"create": 1, "review": 1})
+            self.assertEqual(summary["by_type"], {"preference": 1, "workflow": 1})
+            self.assertEqual(summary["duplicate_count"], 1)
+            self.assertEqual(summary["conflict_count"], 1)
+            self.assertEqual(summary["needs_manual_count"], 1)
+
 
     def test_api_memory_run_review_queue_returns_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,7 +722,7 @@ class MemoryReviewWebTests(unittest.TestCase):
                     "scope": "project",
                     "project": "/tmp/project",
                     "memory_type": "decision",
-                    "summary": "项目目标是通用记忆系统。",
+                    "summary": "项目目标是本地记忆系统 V1。",
                     "status": "active",
                 }],
             )
@@ -584,6 +741,43 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertIn("dream_analysis", payload["items"][0])
             self.assertEqual(payload["items"][0]["suggested_action"], payload["items"][0]["dream_analysis"]["suggested_action"])
 
+    def test_memory_review_page_distinguishes_new_value_from_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get("/memory-review")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("新增价值", response.text)
+            self.assertIn("已有记忆重复", response.text)
+            self.assertIn("valueClass", response.text)
+            self.assertIn("matched_memory_summary", response.text)
+            self.assertIn("按价值分组", response.text)
+
+    def test_api_memory_run_review_summary_counts_value_classes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
+            queue_path = Path(state["run_dir"]) / "review_queue.jsonl"
+            queue_path.write_text("\n".join([
+                json.dumps({"candidate_id": "new_1", "suggested_action": "create", "candidate": {"id": "new_1", "type": "workflow", "scope": "user", "content": "新增"}, "quality_signals": {"value_class": "new_value"}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+                json.dumps({"candidate_id": "dup_1", "suggested_action": "reject", "candidate": {"id": "dup_1", "type": "workflow", "scope": "user", "content": "重复"}, "quality_signals": {"duplicate": True, "value_class": "existing_duplicate"}, "dream_analysis": {"dream_score": 0.82}}, ensure_ascii=False),
+            ]) + "\n", encoding="utf-8")
+            update_run_state(state, status="waiting_review", phase="review", artifacts={"review_queue_path": str(queue_path)})
+            app = create_app(default_output_dir=Path(tmp) / "runs", default_memory_dir=memory_dir)
+            client = TestClient(app)
+
+            response = client.get(f"/api/memory/runs/{state['run_id']}/review-summary")
+
+            self.assertEqual(response.status_code, 200)
+            summary = response.json()["summary"]
+            self.assertEqual(summary["by_value_class"], {"existing_duplicate": 1, "new_value": 1})
+            self.assertEqual(summary["new_value_count"], 1)
+            self.assertEqual(summary["existing_duplicate_count"], 1)
+
     def test_memory_review_page_uses_review_queue_for_run_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
@@ -597,6 +791,8 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertIn("loadReviewQueue", response.text)
             self.assertIn("review-queue", response.text)
             self.assertIn("conflicts", response.text)
+            self.assertIn("quality_signals:item.quality_signals", response.text)
+            self.assertIn("dream_analysis:item.dream_analysis", response.text)
 
 
 if __name__ == "__main__":
