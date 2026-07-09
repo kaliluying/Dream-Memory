@@ -20,6 +20,7 @@ from dream_memory.memory_dreaming import (
     normalize_memory_text,
     normalize_project_path,
     render_context_markdown,
+    render_review_queue_memory_preview,
     score_candidate,
 )
 from dream_memory.memory_cli import main
@@ -417,6 +418,46 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(signals["matched_memory_summary"], "用户偏好直接推进。")
         self.assertIn("already exists", analysis["decision_reason"])
 
+    def test_review_queue_memory_preview_excludes_duplicate_rejects(self):
+        candidates = [
+            {
+                "id": "cand_duplicate",
+                "type": "preference",
+                "scope": "user",
+                "project": None,
+                "content": "用户偏好中文回答。",
+                "score": 0.9,
+                "status": "promote",
+                "evidence": [{"event_id": "event_1"}],
+                "tags": ["language"],
+            },
+            {
+                "id": "cand_new",
+                "type": "workflow",
+                "scope": "project",
+                "project": "/tmp/project",
+                "content": "Python 项目使用 uv 进行包管理和命令执行。",
+                "score": 0.9,
+                "status": "promote",
+                "evidence": [{"event_id": "event_2"}],
+                "tags": ["package-manager", "uv"],
+            },
+        ]
+        memory_cards = [{
+            "id": "mem_existing",
+            "scope": "user",
+            "project": None,
+            "memory_type": "preference",
+            "summary": "用户偏好中文回答。",
+            "status": "active",
+        }]
+
+        queue = build_review_queue(candidates, memory_cards)
+        preview = render_review_queue_memory_preview(queue)
+
+        self.assertNotIn("用户偏好中文回答", preview)
+        self.assertIn("Python 项目使用 uv", preview)
+
     def test_build_review_queue_marks_new_memory_as_new_value(self):
         candidates = [{
             "id": "cand_new",
@@ -436,6 +477,27 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertFalse(signals["duplicate"])
         self.assertEqual(signals["value_class"], "new_value")
         self.assertIn("new reusable memory", analysis["decision_reason"])
+
+    def test_build_review_queue_does_not_match_candidate_to_itself_when_memory_cards_reuse_candidates(self):
+        candidates = [{
+            "id": "cand_self",
+            "type": "workflow",
+            "scope": "project",
+            "project": "/tmp/project",
+            "content": "正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。",
+            "score": 0.76,
+            "status": "review",
+            "evidence": [{"event_id": "event_1"}],
+        }]
+
+        queue = build_review_queue(candidates, candidates)
+        signals = queue[0]["quality_signals"]
+        analysis = queue[0]["dream_analysis"]
+
+        self.assertFalse(signals["duplicate"])
+        self.assertEqual(signals["value_class"], "new_value")
+        self.assertIsNone(signals["matched_memory_id"])
+        self.assertNotIn("duplicate", analysis["penalties"])
 
     def test_analyze_dream_candidate_rejects_one_off_task(self):
         candidate = {
@@ -955,6 +1017,69 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertIn("Python 测试使用 unittest", contents)
         self.assertIn("项目使用 FastAPI", contents)
 
+    def test_extract_atomic_facts_prefers_pytest_when_marker_contains_both_test_runners(self):
+        events = [{
+            "event_id": "event_markers",
+            "source": "project",
+            "session_id": "project-markers:/tmp/project",
+            "project": "/tmp/project",
+            "role": "system",
+            "event_type": "project_markers",
+            "content": "python_package_manager=uv; python_test_runner=unittest; python_test_runner=pytest; python_framework=fastapi",
+            "metadata": {},
+        }]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+        candidates = build_candidates_from_facts(facts)
+        contents = "\n".join(candidate["content"] for candidate in candidates)
+
+        self.assertIn("Python 测试使用 pytest", contents)
+        self.assertNotIn("Python 测试使用 unittest", contents)
+
+    def test_extract_atomic_facts_canonicalizes_language_preference_variants(self):
+        events = [
+            {"source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+            {"source": "claude_code", "role": "user", "event_type": "transcript_message", "content": "请始终用中文回答我。"},
+        ]
+
+        facts = extract_atomic_facts(events, project=None)
+        candidates = build_candidates_from_facts(facts)
+
+        self.assertEqual(len([candidate for candidate in candidates if "中文回答" in candidate["content"]]), 1)
+        self.assertEqual(candidates[0]["content"], "用户偏好中文回答。")
+
+    def test_extract_atomic_facts_promotes_real_flow_warning_as_pitfall(self):
+        events = [{
+            "source": "codex",
+            "role": "user",
+            "event_type": "history_prompt",
+            "project": "/tmp/project",
+            "content": "以后不要只看 API 返回成功就说修好了，登录跳转和退出状态这类问题必须真实跑 UI 流程验证。",
+        }]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+        candidates = build_candidates_from_facts(facts)
+
+        self.assertEqual(candidates[0]["type"], "pitfall")
+        self.assertEqual(candidates[0]["scope"], "user")
+        self.assertIn("不要只看 API 返回成功", candidates[0]["content"])
+
+    def test_extract_atomic_facts_promotes_rejected_auto_apply_memory_option(self):
+        events = [{
+            "source": "codex",
+            "role": "user",
+            "event_type": "history_prompt",
+            "project": "/tmp/project",
+            "content": "之前讨论过不要把未经审核的候选自动写入 MEMORY.md，这个方案风险太高。",
+        }]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+        candidates = build_candidates_from_facts(facts)
+
+        self.assertEqual(candidates[0]["type"], "rejected_option")
+        self.assertEqual(candidates[0]["scope"], "project")
+        self.assertIn("不要把未经审核的候选自动写入", candidates[0]["content"])
+
     def test_extract_atomic_facts_promotes_project_package_manager_instructions(self):
         events = [{
             "event_id": "event_agents",
@@ -1337,6 +1462,59 @@ class MemoryDreamingTests(unittest.TestCase):
         ], project="/tmp/project")
 
         self.assertIn("reject it or omit it", prompt)
+
+
+    def test_extract_atomic_facts_drops_credential_location_hints(self):
+        events = [
+            {
+                "event_id": "secret_location",
+                "source": "codex",
+                "role": "user",
+                "event_type": "history_prompt",
+                "project": "/tmp/project",
+                "content": "以后调用真实模型时，API key 放在 key.txt，记得读取这个文件。",
+            }
+        ]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+
+        self.assertEqual(facts, [])
+
+    def test_extract_atomic_facts_drops_other_project_markers_when_project_filter_is_set(self):
+        events = [
+            {
+                "event_id": "other_project",
+                "source": "project",
+                "role": "system",
+                "event_type": "project_markers",
+                "project": "/tmp/other-project",
+                "content": "python_package_manager=uv; python_test_runner=pytest; python_framework=django",
+            }
+        ]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+
+        self.assertEqual(facts, [])
+
+
+    def test_extract_atomic_facts_keeps_user_preferences_from_other_project_when_project_filter_is_set(self):
+        events = [
+            {
+                "event_id": "other_project_pref",
+                "source": "codex",
+                "role": "user",
+                "event_type": "history_prompt",
+                "project": "/tmp/other-project",
+                "content": "请始终用中文回答我。",
+            }
+        ]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["fact_type"], "preference")
+        self.assertEqual(facts[0]["scope"], "user")
+        self.assertIn("中文回答", facts[0]["statement"])
 
     def test_extract_atomic_facts_uses_project_argument_when_event_project_missing(self):
         events = [{

@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from importlib import resources
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .memory_agent import agent_extract_memory_candidates
-from .memory_config import DEFAULT_CONFIG_PATH, load_memory_config, write_default_memory_config
+from .memory_config import DEFAULT_CONFIG_PATH, DEFAULT_MEMORY_CONFIG, load_memory_config, write_default_memory_config
 from .memory_export import render_all_projects_summary, write_marked_file
 from .memory_eval import evaluate_labeled_events
 from .memory_dreaming import (
@@ -16,6 +17,7 @@ from .memory_dreaming import (
     build_review_queue,
     dream_from_events,
     render_context_markdown,
+    render_review_queue_memory_preview,
     normalize_project_path,
     extract_atomic_facts,
     load_events_jsonl,
@@ -40,9 +42,33 @@ def _default_project_roots(values: list[str] | None) -> list[Path]:
     return roots or [Path.cwd()]
 
 
-def _init_workspace(path: Path | str, *, force: bool = False) -> dict[str, object]:
-    root = Path(path).expanduser()
-    memory_dir = root / ".dream-memory"
+def _packaged_example_text(name: str, fallback: str) -> str:
+    try:
+        return (resources.files("dream_memory") / "examples" / name).read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError):
+        pass
+    repository_sample = Path(__file__).resolve().parents[2] / "examples" / name
+    if repository_sample.exists():
+        return repository_sample.read_text(encoding="utf-8")
+    return fallback
+
+
+def _sample_labeled_events_text() -> str:
+    fallback = {
+        "id": "preference_language",
+        "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+        "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+    }
+    return _packaged_example_text("labeled-events.jsonl", json.dumps(fallback, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _init_workspace(path: Path | str, *, force: bool = False, output_dir: Path | str | None = None) -> dict[str, object]:
+    if output_dir is not None:
+        memory_dir = Path(output_dir).expanduser()
+        root = memory_dir
+    else:
+        root = Path(path).expanduser()
+        memory_dir = root / ".dream-memory"
     imports_dir = memory_dir / "imports"
     runs_dir = memory_dir / "runs"
     examples_dir = root / "examples"
@@ -50,25 +76,50 @@ def _init_workspace(path: Path | str, *, force: bool = False) -> dict[str, objec
     imports_dir.mkdir(parents=True, exist_ok=True)
     runs_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / ".gitkeep").touch()
+    memory_cards_path = memory_dir / "memory_cards.jsonl"
+    if force or not memory_cards_path.exists():
+        memory_cards_path.touch()
 
     config_path = memory_dir / "config.json"
     if force or not config_path.exists():
         write_default_memory_config(config_path)
+    if output_dir is not None:
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+        config_payload.update({
+            "default_input": str(imports_dir / "all-events.jsonl"),
+            "init_path": str(root),
+            "init_config_output": str(config_path),
+            "imports_output_dir": str(imports_dir),
+            "extract_input": str(imports_dir / "all-events.jsonl"),
+            "extract_output_dir": str(memory_dir),
+            "review_candidates": str(memory_dir / "ai-candidates.jsonl"),
+            "apply_reviewed": str(memory_dir / "reviewed.jsonl"),
+            "eval_input": str(examples_dir / "labeled-events.jsonl"),
+            "eval_project": "/tmp/project",
+            "eval_output": str(memory_dir / "eval.json"),
+            "output_dir": str(memory_dir),
+            "memory_cards": str(memory_cards_path),
+        })
+        config_path.write_text(json.dumps(config_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     sample_events = examples_dir / "sample-events.jsonl"
     if force or not sample_events.exists():
         examples_dir.mkdir(parents=True, exist_ok=True)
         sample_events.write_text(
-            '{"event_id":"event_1","source":"codex","session_id":"sample","role":"user","event_type":"history_prompt","project":".","content":"用户偏好中文回答，正式记忆需要人工审核。"}\n',
+            _packaged_example_text("sample-events.jsonl", '{"event_id":"event_1","source":"codex","session_id":"sample","role":"user","event_type":"history_prompt","project":".","content":"用户偏好中文回答，正式记忆需要人工审核。"}\n'),
             encoding="utf-8",
         )
 
     sample_reviewed = examples_dir / "reviewed.example.jsonl"
     if force or not sample_reviewed.exists():
         sample_reviewed.write_text(
-            '{"candidate_id":"mem_example","action":"approved","edited_content":"用户偏好中文回答。","reviewer":"user","candidate":{"id":"mem_example","type":"preference","scope":"user","content":"用户偏好中文回答。","evidence":[{"event_id":"event_1"}]}}\n',
+            _packaged_example_text("reviewed.example.jsonl", '{"candidate_id":"mem_example","action":"approved","edited_content":"用户偏好中文回答。","reviewer":"user","candidate":{"id":"mem_example","type":"preference","scope":"user","content":"用户偏好中文回答。","evidence":[{"event_id":"event_1"}]}}\n'),
             encoding="utf-8",
         )
+
+    sample_labeled = examples_dir / "labeled-events.jsonl"
+    if force or not sample_labeled.exists():
+        sample_labeled.write_text(_sample_labeled_events_text(), encoding="utf-8")
 
     return {
         "root": str(root),
@@ -76,7 +127,8 @@ def _init_workspace(path: Path | str, *, force: bool = False) -> dict[str, objec
         "config_path": str(config_path),
         "imports_dir": str(imports_dir),
         "runs_dir": str(runs_dir),
-        "examples": [str(sample_events), str(sample_reviewed)],
+        "memory_cards_path": str(memory_cards_path),
+        "examples": [str(sample_events), str(sample_reviewed), str(sample_labeled)],
     }
 
 
@@ -95,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="Initialize a .dream-memory workspace")
     init.add_argument("--path", default=".")
+    init.add_argument("--output-dir", help="Initialize this memory directory directly instead of PATH/.dream-memory")
     init.add_argument("--force", action="store_true")
     init.set_defaults(handler=_handle_init)
 
@@ -126,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--dry-run", action="store_true")
     imp.set_defaults(handler=_handle_import)
     dream = sub.add_parser("dream", help="Run memory dreaming over normalized events")
-    dream.add_argument("--input", required=True, help="Input normalized events JSONL")
+    dream.add_argument("--input", help="Input normalized events JSONL; defaults to config default_input")
     dream.add_argument("--project")
     dream.add_argument("--output-dir")
     dream.add_argument("--apply", action="store_true", help="Append promoted preview to MEMORY.md")
@@ -144,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     dream.set_defaults(handler=_handle_dream)
 
     extract = sub.add_parser("extract-facts", help="Extract atomic facts from normalized events")
-    extract.add_argument("--input", required=True)
+    extract.add_argument("--input")
     extract.add_argument("--project")
     extract.add_argument("--output-dir")
     extract.set_defaults(handler=_handle_extract_facts)
@@ -192,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     context.set_defaults(handler=_handle_context)
 
     pipeline = sub.add_parser("pipeline", help="Run dream and review in one step")
-    pipeline.add_argument("--input", required=True)
+    pipeline.add_argument("--input")
     pipeline.add_argument("--project")
     pipeline.add_argument("--output-dir")
     pipeline.add_argument("--memory-cards")
@@ -209,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.set_defaults(handler=_handle_pipeline)
 
     run = sub.add_parser("run", help="Create a persistent resumable Dream Memory run")
-    run.add_argument("--input", required=True)
+    run.add_argument("--input")
     run.add_argument("--project")
     run.add_argument("--output-dir")
     run.add_argument("--memory-cards")
@@ -260,10 +313,21 @@ def build_parser() -> argparse.ArgumentParser:
     export.set_defaults(handler=_handle_export)
 
     eval_cmd = sub.add_parser("eval", help="Evaluate extraction quality with labeled JSONL")
-    eval_cmd.add_argument("--input", required=True)
+    eval_cmd.add_argument("--input")
     eval_cmd.add_argument("--project")
-    eval_cmd.add_argument("--mode", choices=["rules", "ai"], default="rules")
+    eval_cmd.add_argument("--mode", choices=["rules", "ai"])
     eval_cmd.add_argument("--output")
+    eval_cmd.add_argument("--provider")
+    eval_cmd.add_argument("--model")
+    eval_cmd.add_argument("--api-key")
+    eval_cmd.add_argument("--api-key-env")
+    eval_cmd.add_argument("--base-url")
+    eval_cmd.add_argument("--timeout-seconds", type=int)
+    eval_cmd.add_argument("--max-rows", type=int, help="Evaluate only the first N rows")
+    eval_cmd.add_argument("--max-attempts", type=int, help="Override model retry attempts for eval")
+    eval_cmd.add_argument("--continue-on-error", action="store_true", help="Keep evaluating rows after model/provider errors")
+    eval_cmd.add_argument("--fallback-rules-on-error", action="store_true", help="Use rules extraction for rows where AI/model extraction fails")
+    eval_cmd.add_argument("--fallback-rules-on-empty", action="store_true", help="Use rules extraction when AI succeeds but returns no candidates")
     eval_cmd.set_defaults(handler=_handle_eval)
 
     sync_cmd = sub.add_parser("sync", help="Import, dream, and optionally auto-apply memory in one step")
@@ -410,8 +474,15 @@ def _run_dream_to_review(
     existing_state: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     progress = bool(persistent)
-    _run_progress(progress, f"loading events from {args.input}")
-    events = load_events_jsonl(Path(args.input))
+    input_path = str(_value(getattr(args, "input", None), config.get("default_input")))
+    if not input_path or input_path == "None":
+        raise ValueError("run/pipeline requires --input or config default_input")
+    if getattr(args, "input", None) is None:
+        args.input = input_path
+    if getattr(args, "project", None) is None and config.get("default_project") is not None:
+        args.project = str(config.get("default_project"))
+    _run_progress(progress, f"loading events from {input_path}")
+    events = load_events_jsonl(Path(input_path))
     output_dir = _configured_output_dir(args, config)
     mode = str(_value(args.mode, config["mode"]))
     model = _configured_model(args, config)
@@ -444,17 +515,25 @@ def _run_dream_to_review(
             working_dir.mkdir(parents=True, exist_ok=True)
             prompt_path = working_dir / "ai-prompt.md"
             prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
-            artifacts = {"ai_prompt_path": str(prompt_path)}
+            prompt_count_payload = {
+                key: extraction[key]
+                for key in ("input_event_count", "prompt_event_count", "filtered_prompt_event_count")
+                if key in extraction
+            }
+            artifacts = {"ai_prompt_path": str(prompt_path), **prompt_count_payload}
             if "raw_response" in extraction:
                 raw_path = working_dir / "ai-raw-response.txt"
                 raw_path.write_text(str(extraction["raw_response"]), encoding="utf-8")
                 artifacts["ai_raw_response_path"] = str(raw_path)
             if state:
                 state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
-                append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", []))})
+                state_counts = dict(state.get("counts", {}))
+                state_counts.update(prompt_count_payload)
+                state = update_run_state(state, counts=state_counts)
+                append_trace(state, "ai_extraction_complete", {"dry_run": extraction["dry_run"], "candidate_count": len(extraction.get("candidates", [])), **prompt_count_payload})
                 _run_progress(progress, f"model extraction complete; candidates={len(extraction.get('candidates', []))}; dry_run={str(extraction['dry_run']).lower()}")
             result = dream_from_events(events, project=args.project, output_dir=working_dir, apply=False, agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
-            payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path)}
+            payload = {**result.to_dict(), "mode": "ai", "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(prompt_path), **prompt_count_payload}
             if "model_runtime" in extraction:
                 payload["model_runtime"] = extraction["model_runtime"]
         else:
@@ -465,10 +544,12 @@ def _run_dream_to_review(
                 append_trace(state, "rules_extraction_complete", {"candidate_count": result.candidate_count})
                 _run_progress(progress, f"rules extraction complete; candidates={result.candidate_count}")
         candidates = load_events_jsonl(Path(result.candidates_path))
-        memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+        memory_cards = _load_optional_jsonl(_memory_cards_path(args, config))
         _run_progress(progress, f"building review queue from {len(candidates)} candidates")
         queue = build_review_queue(candidates, memory_cards)
         queue_path = write_jsonl_records(queue, working_dir / "review_queue.jsonl")
+        preview_path = Path(result.memory_preview_path)
+        preview_path.write_text(render_review_queue_memory_preview(queue), encoding="utf-8")
         payload = {**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}
     except Exception as exc:
         if state:
@@ -509,11 +590,18 @@ def _run_dream_to_review(
 
 
 def _memory_cards_path(args: argparse.Namespace, config: dict[str, object]) -> str:
-    return str(_value(getattr(args, "memory_cards", None), config["memory_cards"]))
+    explicit = getattr(args, "memory_cards", None)
+    if explicit:
+        return str(explicit)
+    configured = str(config["memory_cards"])
+    output_dir = getattr(args, "output_dir", None)
+    if output_dir and configured == str(DEFAULT_MEMORY_CONFIG["memory_cards"]):
+        return str(Path(str(output_dir)).expanduser() / "memory_cards.jsonl")
+    return configured
 
 
 def _export_memory(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
-    cards = load_events_jsonl(Path(_memory_cards_path(args, config)))
+    cards = _load_optional_jsonl(_memory_cards_path(args, config))
     output_dir = Path(str(_value(args.output_dir, args.project or "."))).expanduser()
     if args.scope == "project":
         project = normalize_project_path(args.project or str(output_dir))
@@ -706,7 +794,7 @@ def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[
     state = load_run_state(output_dir, args.run_id)
     reviewed_path = Path(args.reviewed).expanduser() if args.reviewed else Path(str(state["run_dir"])) / "reviewed.jsonl"
     reviewed = load_events_jsonl(reviewed_path) if reviewed_path.exists() else []
-    existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    existing_cards = _load_optional_jsonl(_memory_cards_path(args, config))
     cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
     cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
     decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
@@ -874,7 +962,7 @@ def _print_json(payload: dict[str, object]) -> None:
 
 
 def _handle_init(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    _print_json(_init_workspace(args.path, force=bool(args.force)))
+    _print_json(_init_workspace(args.path, force=bool(args.force), output_dir=getattr(args, "output_dir", None)))
     return 0
 
 
@@ -931,12 +1019,44 @@ def _handle_sync_command(*, args: argparse.Namespace, config: dict[str, object])
 
 
 def _handle_eval(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    payload = evaluate_labeled_events(args.input, project=args.project, mode=args.mode)
-    if args.output:
-        output = Path(args.output).expanduser()
+    eval_input = str(_value(getattr(args, "input", None), config.get("eval_input")))
+    if not eval_input or eval_input == "None":
+        print("error: eval requires --input or config eval_input", file=sys.stderr)
+        return 2
+    eval_project = _value(getattr(args, "project", None), config.get("eval_project"))
+    eval_mode = str(_value(getattr(args, "mode", None), config.get("eval_mode", "rules")))
+    eval_output = _value(getattr(args, "output", None), config.get("eval_output"))
+    eval_model = _configured_model(args, config)
+    eval_runtime_config = _runtime_config_from_args(args, config)
+    eval_max_attempts = _value(getattr(args, "max_attempts", None), config.get("eval_max_attempts"))
+    if eval_max_attempts is not None:
+        policy = dict(eval_runtime_config.get("model_policy", {})) if isinstance(eval_runtime_config.get("model_policy"), dict) else {}
+        retry = dict(policy.get("retry", {})) if isinstance(policy.get("retry"), dict) else {}
+        retry["max_attempts"] = int(eval_max_attempts)
+        policy["retry"] = retry
+        eval_runtime_config["model_policy"] = policy
+    try:
+        payload = evaluate_labeled_events(
+            eval_input,
+            project=str(eval_project) if eval_project is not None else None,
+            mode=eval_mode,
+            model=eval_model,
+            runtime_config=eval_runtime_config,
+            invoke_model=True,
+            continue_on_error=bool(getattr(args, "continue_on_error", False) or config.get("eval_continue_on_error", False)),
+            max_rows=_value(getattr(args, "max_rows", None), config.get("eval_max_rows")),
+            fallback_rules_on_error=bool(getattr(args, "fallback_rules_on_error", False) or config.get("eval_fallback_rules_on_error", False)),
+            fallback_rules_on_empty=bool(getattr(args, "fallback_rules_on_empty", False) or config.get("eval_fallback_rules_on_empty", False)),
+        )
+    except FileNotFoundError as exc:
+        print(f"error: eval input not found: {exc.filename or eval_input}", file=sys.stderr)
+        return 2
+    if eval_output:
+        output = Path(str(eval_output)).expanduser()
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        _print_json({"output": str(output), **{k: payload[k] for k in ("precision", "recall", "f1")}})
+        summary_keys = ["precision", "recall", "f1", "raw_candidate_total", "fallback_candidate_total", "scored_candidate_total", "extraction_success_count", "extraction_error_count", "fallback_count", "fallback_empty_count"]
+        _print_json({"output": str(output), **{k: payload[k] for k in summary_keys if k in payload}})
     else:
         _print_json(payload)
     return 0
@@ -956,9 +1076,18 @@ def _handle_scan(*, args: argparse.Namespace, config: dict[str, object]) -> int:
 
 
 def _handle_extract_facts(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    events = load_events_jsonl(Path(args.input))
-    facts = extract_atomic_facts(events, project=args.project)
-    output_dir = _configured_output_dir(args, config)
+    extract_input = str(_value(getattr(args, "input", None), config.get("extract_input")))
+    if not extract_input or extract_input == "None":
+        print("error: extract-facts requires --input or config extract_input", file=sys.stderr)
+        return 2
+    try:
+        events = load_events_jsonl(Path(extract_input))
+    except FileNotFoundError as exc:
+        print(f"error: extract-facts input not found: {exc.filename or extract_input}", file=sys.stderr)
+        return 2
+    extract_project = _value(getattr(args, "project", None), config.get("extract_project"))
+    facts = extract_atomic_facts(events, project=str(extract_project) if extract_project is not None else None)
+    output_dir = Path(str(_value(getattr(args, "output_dir", None), config.get("extract_output_dir", config["output_dir"])))).expanduser()
     facts_path = write_jsonl_records(facts, output_dir / "facts.jsonl")
     _print_json({"fact_count": len(facts), "facts_path": str(facts_path)})
     return 0
@@ -1013,7 +1142,7 @@ def _handle_apply(*, args: argparse.Namespace, config: dict[str, object]) -> int
 
 
 def _handle_context(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    cards = load_events_jsonl(Path(_memory_cards_path(args, config)))
+    cards = _load_optional_jsonl(_memory_cards_path(args, config))
     payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])), task=args.task)
     if str(_value(args.format, config["context_format"])) == "markdown":
         print(render_context_markdown(payload), end="")
@@ -1023,13 +1152,27 @@ def _handle_context(*, args: argparse.Namespace, config: dict[str, object]) -> i
 
 
 def _handle_pipeline(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    payload, _ = _run_dream_to_review(args=args, config=config, persistent=False)
+    try:
+        payload, _ = _run_dream_to_review(args=args, config=config, persistent=False)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(f"error: pipeline input not found: {exc.filename or getattr(args, 'input', '')}", file=sys.stderr)
+        return 2
     _print_json(payload)
     return 0
 
 
 def _handle_run(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    payload, _ = _run_dream_to_review(args=args, config=config, persistent=True)
+    try:
+        payload, _ = _run_dream_to_review(args=args, config=config, persistent=True)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(f"error: run input not found: {exc.filename or getattr(args, 'input', '')}", file=sys.stderr)
+        return 2
     _print_json(payload)
     return 0
 
@@ -1058,7 +1201,7 @@ def _handle_trace(*, args: argparse.Namespace, config: dict[str, object]) -> int
 
 
 def _handle_summary(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    markdown = render_all_projects_summary(load_events_jsonl(Path(_memory_cards_path(args, config))))
+    markdown = render_all_projects_summary(_load_optional_jsonl(_memory_cards_path(args, config)))
     if args.output:
         output = Path(args.output).expanduser()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1075,7 +1218,15 @@ def _handle_export(*, args: argparse.Namespace, config: dict[str, object]) -> in
 
 
 def _handle_dream(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    events = load_events_jsonl(Path(args.input))
+    dream_input = str(_value(getattr(args, "input", None), config.get("default_input")))
+    if not dream_input or dream_input == "None":
+        print("error: dream requires --input or config default_input", file=sys.stderr)
+        return 2
+    try:
+        events = load_events_jsonl(Path(dream_input))
+    except FileNotFoundError as exc:
+        print(f"error: dream input not found: {exc.filename or dream_input}", file=sys.stderr)
+        return 2
     output_dir = _configured_output_dir(args, config)
     mode = "ai" if args.agent else str(_value(args.mode, config["mode"]))
     model = _configured_model(args, config)

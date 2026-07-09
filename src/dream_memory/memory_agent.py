@@ -6,7 +6,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .memory_dreaming import build_candidates_from_facts, normalize_project_path
+from .memory_dreaming import (
+    build_candidates_from_facts,
+    normalize_project_path,
+    _is_code_or_listing_dump_content,
+    _is_low_value_event_content,
+    _is_long_generic_memory_content,
+    _is_structural_or_one_off_artifact,
+)
 from .model_providers import invoke_model as invoke_model_provider, invoke_model_runtime
 
 
@@ -30,12 +37,36 @@ SHALLOW_PROJECT_TASK_RE = re.compile(
 CREDENTIAL_LOCATION_RE = re.compile(r"(密钥|key|token|api[_-]?key).{0,12}(在|文件|path|路径).{0,24}(\.txt|\.env|json|yaml|yml|配置)", re.I)
 
 
+def _is_prompt_noise_event(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("event_type") or "")
+    content = str(event.get("content") or "")
+    if not content.strip():
+        return True
+    if event_type in {"project_state", "project_settings", "tool_output", "build_log"}:
+        return True
+    if event_type == "project_markers":
+        return False
+    if _is_low_value_event_content(content):
+        return True
+    if _is_code_or_listing_dump_content(content):
+        return True
+    if _is_long_generic_memory_content(content, event_type):
+        return True
+    if _is_structural_or_one_off_artifact(content, event_type):
+        return True
+    return False
+
+
 def _event_preview(events: list[dict[str, Any]], limit: int = 80) -> list[dict[str, Any]]:
     preview = []
-    for index, event in enumerate(events[:limit], start=1):
+    for index, event in enumerate(events, start=1):
+        if len(preview) >= limit:
+            break
         content = str(event.get("content") or "")
+        if _is_prompt_noise_event(event):
+            continue
         preview.append({
-            "event_id": f"event_{index}",
+            "event_id": str(event.get("event_id") or event.get("id") or f"event_{index}"),
             "source": event.get("source"),
             "session_id": event.get("session_id"),
             "project": event.get("project"),
@@ -44,6 +75,16 @@ def _event_preview(events: list[dict[str, Any]], limit: int = 80) -> list[dict[s
             "content": content[:1200],
         })
     return preview
+
+
+def _prompt_event_counts(events: list[dict[str, Any]], limit: int = 80) -> dict[str, int]:
+    input_event_count = len(events)
+    prompt_event_count = min(limit, sum(1 for event in events if not _is_prompt_noise_event(dict(event))))
+    return {
+        "input_event_count": input_event_count,
+        "prompt_event_count": prompt_event_count,
+        "filtered_prompt_event_count": input_event_count - prompt_event_count,
+    }
 
 
 def build_memory_extraction_prompt(events: list[dict[str, Any]], *, project: str | None) -> str:
@@ -60,10 +101,10 @@ Your job:
 - Keep every candidate grounded in evidence.
 - Write all human-readable output fields in Simplified Chinese, especially content, reason, and tags.
 - Keep product names, model names, file paths, CLI commands, code identifiers, and API names unchanged.
-- Project filter is strict: if a project filter is provided, only emit project-scoped candidates for that exact project; if the filter is global, omit project-scoped tasks from other projects.
+- Project filter is strict for project-scoped facts: if a project filter is provided, only emit project-scoped candidates for that exact project. User-scope preferences and workflows may still be emitted even when their source event came from another project. If the filter is global, omit project-scoped tasks from other projects.
 - Do not promote one-off implementation tasks, old TODOs, bug reports, transient commands, endpoint failures, "delete/modify this UI", or single-run scripts unless they reveal a durable reusable rule.
 - A valuable memory must change future assistant behavior: user preference, durable architecture decision, reusable workflow/pitfall, rejected option, or long-lived product direction.
-- Never include credential locations such as "key is in key.txt"; treat them as sensitive operational details.
+- Never include credential locations such as "key is in key.txt"; treat them as sensitive operational details. If the supporting evidence quote contains a credential location, omit the candidate entirely instead of turning it into a safety recommendation.
 
 Return JSON only with this schema. Prefer `atomic_facts`; the application will aggregate those facts into review candidates:
 {{
@@ -97,8 +138,11 @@ Return JSON only with this schema. Prefer `atomic_facts`; the application will a
 }}
 
 Important policy:
-- If an event says only "Claude Code project state for /path", reject it or omit it.
+- If an event is only project-state metadata for a path, reject it or omit it.
 - If an event contains explicit preferences like always answer in Chinese, promote it.
+- If an event is `project_instruction` and states package managers such as "Python uses uv" / "frontend uses pnpm", extract it as a project workflow.
+- If an event is `project_markers` and contains markers like `python_package_manager=uv`, `python_test_runner=pytest`, or `python_framework=fastapi`, extract durable project workflow/fact memories.
+- Canonicalize common durable memories when possible: use "用户偏好中文回答。" for Chinese-language preference; use "Python 后端使用 uv 进行包管理，前端使用 pnpm 进行管理。" for uv/pnpm project instructions.
 - If an event says the project should become Claude Code-like, promote it as product_direction.
 - If an event is merely "delete watermark", "change page text", "use real data", "run two tests", or similar implementation work, reject it or omit it.
 - If the original event is in another language, summarize the durable memory in Simplified Chinese.
@@ -158,6 +202,14 @@ def _valid_evidence(value: Any) -> list[dict[str, Any]]:
     return evidence
 
 
+def _evidence_has_sensitive_operational_detail(evidence: list[dict[str, Any]]) -> bool:
+    for item in evidence:
+        text = " ".join(str(item.get(key) or "") for key in ("quote", "content", "text", "summary"))
+        if text and (SENSITIVE_RE.search(text) or CREDENTIAL_LOCATION_RE.search(text)):
+            return True
+    return False
+
+
 def _evidence_refs(evidence: list[dict[str, Any]]) -> list[str]:
     refs: list[str] = []
     for index, item in enumerate(evidence, start=1):
@@ -179,11 +231,19 @@ def _string_list(value: Any) -> list[str]:
 
 def _is_low_value_candidate(content: str, memory_type: str) -> bool:
     normalized = _normalize_text(content)
+    lowered = content.lower()
+    durable_tooling_workflow = memory_type == "workflow" and (
+        "uv" in lowered
+        or "pnpm" in lowered
+        or "python_package_manager" in lowered
+        or "frontend_package_manager" in lowered
+        or "包管理" in content
+    )
     if CREDENTIAL_LOCATION_RE.search(content):
         return True
     if memory_type == "requirement" and ONE_OFF_TASK_RE.search(content):
         return True
-    if memory_type in {"requirement", "workflow"} and SHALLOW_PROJECT_TASK_RE.search(content):
+    if memory_type in {"requirement", "workflow"} and SHALLOW_PROJECT_TASK_RE.search(content) and not durable_tooling_workflow:
         return True
     if "全流程测试重点关注" in content:
         return True
@@ -220,7 +280,7 @@ def validate_agent_candidates(candidates: list[dict[str, Any]], *, project: str 
         if decision not in ALLOWED_DECISIONS:
             continue
         evidence = _valid_evidence(raw.get("evidence"))
-        if not evidence:
+        if not evidence or _evidence_has_sensitive_operational_detail(evidence):
             continue
         candidate_project = raw.get("project")
         if scope == "project":
@@ -275,7 +335,7 @@ def validate_agent_atomic_facts(facts: list[dict[str, Any]], *, project: str | N
         if scope not in ALLOWED_SCOPES:
             continue
         evidence = _valid_evidence(raw.get("evidence"))
-        if not evidence:
+        if not evidence or _evidence_has_sensitive_operational_detail(evidence):
             continue
         fact_project = raw.get("project")
         if scope == "project":
@@ -292,6 +352,29 @@ def validate_agent_atomic_facts(facts: list[dict[str, Any]], *, project: str | N
         reuse_scenarios = _string_list(raw.get("reuse_scenarios") or raw.get("retrieval_hints"))
         long_term_reason = str(raw.get("long_term_reason") or raw.get("reason") or "").strip()
         confidence = _coerce_confidence(raw.get("confidence", 0.5))
+        tags = _string_list(raw.get("tags"))
+        canonical_project = fact_project
+        if project and (
+            ("正式记忆" in statement and "人工审核" in statement)
+            or ("未经审核" in statement and "自动写入" in statement)
+        ):
+            canonical_project = normalize_project_path(project)
+
+        canonical_facts = _canonical_agent_facts_from_statement(
+            statement=statement,
+            fact_type=fact_type,
+            scope=scope,
+            project=canonical_project,
+            evidence=evidence,
+            confidence=confidence,
+            long_term=long_term,
+            long_term_reason=long_term_reason,
+            reuse_scenarios=reuse_scenarios,
+            tags=tags,
+        )
+        if canonical_facts:
+            valid.extend(canonical_facts)
+            continue
         valid.append({
             "id": str(raw.get("id") or _stable_candidate_id(_normalize_text(statement), scope, str(fact_project) if fact_project else None)),
             "fact_type": fact_type,
@@ -306,11 +389,66 @@ def validate_agent_atomic_facts(facts: list[dict[str, Any]], *, project: str | N
             "long_term": long_term,
             "long_term_reason": long_term_reason,
             "reuse_scenarios": reuse_scenarios,
-            "tags": _string_list(raw.get("tags")),
+            "tags": tags,
             "status": "active",
         })
     return valid
 
+
+
+def _canonical_agent_facts_from_statement(
+    *,
+    statement: str,
+    fact_type: str,
+    scope: str,
+    project: str | None,
+    evidence: list[dict[str, Any]],
+    confidence: float,
+    long_term: bool,
+    long_term_reason: str,
+    reuse_scenarios: list[str],
+    tags: list[str],
+) -> list[dict[str, Any]]:
+    lowered = statement.lower()
+    canonical: list[dict[str, Any]] = []
+
+    def build(statement_value: str, fact_type_value: str, extra_tags: list[str]) -> dict[str, Any]:
+        return {
+            "id": _stable_candidate_id(_normalize_text(statement_value), scope, str(project) if project else None),
+            "fact_type": fact_type_value,
+            "statement": statement_value,
+            "scope": scope,
+            "project": project,
+            "source": evidence[0].get("source"),
+            "session_id": evidence[0].get("session_id"),
+            "evidence": evidence,
+            "evidence_refs": _evidence_refs(evidence),
+            "confidence": confidence,
+            "long_term": long_term,
+            "long_term_reason": long_term_reason,
+            "reuse_scenarios": reuse_scenarios,
+            "tags": sorted(set(tags + extra_tags)),
+            "status": "active",
+        }
+
+    if fact_type == "workflow" and ("uv" in lowered or "pnpm" in lowered or "包管理" in statement):
+        if "uv" in lowered and ("pnpm" in lowered or "前端" in statement):
+            canonical.append(build("Python 后端使用 uv 进行包管理，前端使用 pnpm 进行管理。", "workflow", ["package-manager", "uv", "pnpm", "python", "frontend"]))
+        elif "uv" in lowered:
+            canonical.append(build("Python 项目使用 uv 进行包管理和命令执行。", "workflow", ["package-manager", "uv", "python"]))
+    if "pytest" in lowered:
+        canonical.append(build("Python 测试使用 pytest，验证时应优先运行对应测试命令。", "workflow", ["testing", "python", "pytest"]))
+    if "fastapi" in lowered:
+        canonical.append(build("项目使用 FastAPI 作为 Python Web 框架。", "project_fact", ["framework", "python", "fastapi"]))
+    if "正式记忆" in statement and "人工审核" in statement:
+        review_scope = "project" if project else scope
+        canonical.append({**build("正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。", "workflow", ["review-gate", "memory-safety"]), "scope": review_scope, "project": project if review_scope == "project" else None})
+    if "api" in lowered and ("真实" in statement or "ui" in lowered or "流程" in statement) and ("验证" in statement or "跑" in statement):
+        canonical.append({**build("不要只看 API 返回成功就判断问题已修复，涉及登录跳转、退出状态等可见产品问题必须真实跑 UI 流程验证。", "pitfall", ["pitfall", "ui-validation", "real-flow"]), "scope": "user", "project": None})
+    if "未经审核" in statement and "自动写入" in statement:
+        rejected_scope = "project" if project else scope
+        canonical.append({**build("不要把未经审核的候选自动写入长期记忆或 MEMORY.md。", "rejected_option", ["rejected-option", "memory-safety", "review-gate"]), "scope": rejected_scope, "project": project if rejected_scope == "project" else None})
+    return canonical
 
 def build_agent_candidates_from_payload(payload: dict[str, Any], *, project: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     atomic_facts = validate_agent_atomic_facts(list(payload.get("atomic_facts", [])), project=project)
@@ -341,6 +479,7 @@ def agent_extract_memory_candidates(
     trace_callback: Any = None,
 ) -> dict[str, Any]:
     prompt = build_memory_extraction_prompt(events, project=project)
+    counts = _prompt_event_counts(events)
     runtime = "direct-memory-extraction"
     if not invoke_model:
         return {
@@ -350,6 +489,7 @@ def agent_extract_memory_candidates(
             "prompt": prompt,
             "atomic_facts": [],
             "candidates": [],
+            **counts,
         }
 
     model_runtime: dict[str, Any] | None = None
@@ -377,6 +517,7 @@ def agent_extract_memory_candidates(
         "raw_response": text,
         "atomic_facts": atomic_facts,
         "candidates": candidates,
+        **counts,
     }
     if model_runtime is not None:
         response["model_runtime"] = model_runtime

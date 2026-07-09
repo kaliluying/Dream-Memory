@@ -90,7 +90,7 @@ def _config_payload(memory_dir: Path) -> dict[str, Any]:
         "config": config,
         "cli_options": {
             "global": ["--config", "--codex-home", "--claude-home", "--claude-state", "--project"],
-            "init": ["--path", "--force"],
+            "init": ["--path", "--output-dir", "--force"],
             "init-config": ["--output"],
             "check-provider": ["--provider", "--model", "--api-key", "--api-key-env", "--base-url", "--timeout-seconds", "--invoke", "--all", "--profile"],
             "scan": ["--output"],
@@ -106,7 +106,7 @@ def _config_payload(memory_dir: Path) -> dict[str, Any]:
             "context": ["--project", "--memory-cards", "--limit", "--format"],
             "summary": ["--scope", "--memory-cards", "--output"],
             "export": ["--target", "--scope", "--project", "--memory-cards", "--output-dir", "--limit"],
-            "eval": ["--input", "--project", "--mode", "--output"],
+            "eval": ["--input", "--project", "--mode", "--output", "--provider", "--model", "--api-key", "--api-key-env", "--base-url", "--timeout-seconds", "--max-rows", "--max-attempts", "--continue-on-error", "--fallback-rules-on-error", "--fallback-rules-on-empty"],
         },
     }
 
