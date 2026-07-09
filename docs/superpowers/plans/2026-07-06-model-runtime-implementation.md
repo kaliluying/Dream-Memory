@@ -4,9 +4,9 @@
 
 **Goal:** Add named model profiles, retry/backoff, fallback chains, and run trace metadata while preserving the existing Dream Memory CLI behavior.
 
-**Architecture:** Add focused runtime data structures and orchestration to the model provider layer, then thread runtime metadata through the LangGraph extraction path and CLI persistent run flow. Existing flat config remains valid by normalizing it into an implicit profile and policy.
+**Architecture:** Add focused runtime data structures and orchestration to the model provider layer, then thread runtime metadata through the direct extraction path and CLI persistent run flow. Existing flat config remains valid by normalizing it into an implicit profile and policy.
 
-**Tech Stack:** Python 3.11+, stdlib `urllib`, `dataclasses`, existing `argparse` CLI, LangGraph, pytest/unittest.
+**Tech Stack:** Python 3.11+, stdlib `urllib`, `dataclasses`, existing `argparse` CLI, pytest/unittest.
 
 ---
 
@@ -14,7 +14,7 @@
 
 - Modify `src/dream_memory/memory_config.py`: extend defaults with `models/model_policy`, add config normalization helpers.
 - Modify `src/dream_memory/model_providers.py`: add error classes, retry policy/profile dataclasses, runtime orchestration, and diagnostics for all profiles.
-- Modify `src/dream_memory/memory_graph.py`: accept runtime config and expose runtime metadata in graph state.
+- Modify `src/dream_memory/memory_agent.py`: accept runtime config and expose runtime metadata in extraction results.
 - Modify `src/dream_memory/memory_agent.py`: pass runtime config into the graph and include runtime metadata in extraction output.
 - Modify `src/dream_memory/memory_cli.py`: resolve runtime config from config/CLI overrides, append run trace events, extend `check-provider`.
 - Modify `src/dream_memory/web.py`: keep run start compatible with the new CLI/runtime config path.
@@ -221,9 +221,9 @@ git commit -m "feat: add model runtime retry fallback"
 ## Task 3: Thread Runtime Through Graph and Agent
 
 **Files:**
-- Modify: `src/dream_memory/memory_graph.py`
 - Modify: `src/dream_memory/memory_agent.py`
-- Test: `tests/test_memory_graph.py`
+- Modify: `src/dream_memory/memory_agent.py`
+- Test: `tests/test_memory_agent.py`
 - Test: `tests/test_memory_agent.py`
 
 - [ ] **Step 1: Write failing graph metadata test**
@@ -231,7 +231,7 @@ git commit -m "feat: add model runtime retry fallback"
 Add a graph test asserting runtime metadata is surfaced:
 
 ```python
-with patch("dream_memory.memory_graph.invoke_model_runtime") as invoke:
+with patch("dream_memory.memory_agent.invoke_model_runtime") as invoke:
     invoke.return_value = ModelRuntimeResult(
         text=raw,
         selected_profile="primary",
@@ -249,7 +249,7 @@ Allow `run_memory_extraction_graph()` and `agent_extract_memory_candidates()` to
 
 - [ ] **Step 3: Run graph/agent tests**
 
-Run: `uv run --with pytest pytest tests/test_memory_graph.py tests/test_memory_agent.py -q`
+Run: `uv run --with pytest pytest tests/test_memory_agent.py -q`
 
 Expected: PASS.
 
@@ -258,7 +258,7 @@ Expected: PASS.
 Run:
 
 ```powershell
-git add src/dream_memory/memory_graph.py src/dream_memory/memory_agent.py tests/test_memory_graph.py tests/test_memory_agent.py
+git add src/dream_memory/memory_agent.py tests/test_memory_agent.py
 git commit -m "feat: pass model runtime through extraction graph"
 ```
 
@@ -340,7 +340,7 @@ Document:
 Run:
 
 ```powershell
-uv run --with pytest pytest tests/test_memory_config.py tests/test_model_providers.py tests/test_memory_graph.py tests/test_memory_agent.py tests/test_memory_cli.py tests/test_memory_review_web.py -q
+uv run --with pytest pytest tests/test_memory_config.py tests/test_model_providers.py tests/test_memory_agent.py tests/test_memory_cli.py tests/test_memory_review_web.py -q
 ```
 
 Expected: PASS for changed surfaces.

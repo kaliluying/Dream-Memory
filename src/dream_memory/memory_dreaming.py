@@ -446,6 +446,21 @@ def _is_code_or_listing_dump_content(content: str) -> bool:
     return False
 
 def _is_low_value_event_content(content: str) -> bool:
+    durable_hint = any(token in content for token in [
+        "用户偏好",
+        "偏好",
+        "始终",
+        "必须",
+        "人工审核",
+        "长期记忆",
+        "正式记忆",
+        "不需要再问",
+        "不用问",
+        "按照你的建议",
+        "你决定",
+        "直接做",
+        "直接推进",
+    ])
     if LOW_VALUE_EVENT_RE.search(content):
         return True
     if TASK_BRIEF_RE.search(content):
@@ -530,7 +545,7 @@ def _is_low_value_event_content(content: str) -> bool:
         )
         if path_lines / len(lines_c) > 0.6:
             return True
-    if TRANSIENT_QUESTION_RE.search(content) and not any(token in content for token in ["记住", "始终", "偏好", "必须"]):
+    if TRANSIENT_QUESTION_RE.search(content) and not durable_hint:
         return True
     # <system_reminder> blocks (localized tags)
     if re.match(r"^<system[_-]?reminder", content, re.I):
@@ -579,6 +594,8 @@ def _is_low_value_event_content(content: str) -> bool:
     # bare URL lines with no surrounding context
     if re.match(r"^https?://[^\s]+$", stripped_c2) and "\n" not in stripped_c2:
         return True
+    if durable_hint:
+        return False
     # GBK/GB2312 mojibake: dense non-CJK-range bytes mixed with latin
     mojibake_count = len(re.findall(r"[\x80-\xbf]", content.encode("latin-1", errors="replace").decode("latin-1")))
     if mojibake_count > 8:
@@ -641,7 +658,7 @@ def _is_structural_or_one_off_artifact(content: str, event_type: str) -> bool:
         return False
     stripped = str(content or "").strip()
     lowered = stripped.lower()
-    durable_markers = ["用户偏好", "始终使用中文", "不需要再问", "按照你的建议", "人工审核", "长期记忆"]
+    durable_markers = ["用户偏好", "始终使用中文", "不需要再问", "不用问", "按照你的建议", "你决定", "直接做", "直接推进", "人工审核", "长期记忆", "正式记忆"]
     if any(marker in stripped for marker in durable_markers):
         return False
     if len(stripped) > 500 and any(marker in lowered for marker in ["请修复", "修改文件", "目标", "localstorage", "jwt token", "httpOnly".lower()]):

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .memory_dreaming import build_candidates_from_facts, normalize_project_path
+from .model_providers import invoke_model as invoke_model_provider, invoke_model_runtime
 
 
 
@@ -339,47 +340,37 @@ def agent_extract_memory_candidates(
     runtime_config: dict[str, Any] | None = None,
     trace_callback: Any = None,
 ) -> dict[str, Any]:
-    if isinstance(model, str):
-        from .memory_graph import run_memory_extraction_graph
-
-        result = run_memory_extraction_graph(
-            events,
-            project=project,
-            model=model,
-            invoke_model=invoke_model,
-            runtime_config=runtime_config,
-            trace_callback=trace_callback,
-        )
-        payload = {
-            "runtime": "langgraph-memory-extraction",
-            "dry_run": bool(result.get("dry_run", False)),
-            "model": str(model),
-            "prompt": str(result.get("prompt") or ""),
-            "atomic_facts": list(result.get("atomic_facts", [])),
-            "candidates": list(result.get("candidates", [])),
-        }
-        if "raw_response" in result:
-            payload["raw_response"] = str(result["raw_response"])
-        if "model_runtime" in result:
-            payload["model_runtime"] = dict(result["model_runtime"])
-        return payload
-
     prompt = build_memory_extraction_prompt(events, project=project)
+    runtime = "direct-memory-extraction"
     if not invoke_model:
         return {
-            "runtime": "langgraph-memory-extraction",
+            "runtime": runtime,
             "dry_run": True,
             "model": str(model),
             "prompt": prompt,
             "atomic_facts": [],
             "candidates": [],
         }
-    result = model.invoke(prompt)
-    text = _message_text({"messages": [result]})
+
+    model_runtime: dict[str, Any] | None = None
+    if isinstance(runtime_config, dict):
+        result = invoke_model_runtime(
+            prompt,
+            runtime_config=runtime_config,
+            trace_callback=trace_callback,
+        )
+        text = result.text
+        model_runtime = result.to_dict()
+    elif isinstance(model, str):
+        text = invoke_model_provider(prompt, model=model)
+    else:
+        result = model.invoke(prompt)
+        text = _message_text({"messages": [result]})
+
     payload = extract_json_payload(text)
     atomic_facts, candidates = build_agent_candidates_from_payload(payload, project=project)
-    return {
-        "runtime": "langgraph-memory-extraction",
+    response: dict[str, Any] = {
+        "runtime": runtime,
         "dry_run": False,
         "model": str(model),
         "prompt": prompt,
@@ -387,3 +378,6 @@ def agent_extract_memory_candidates(
         "atomic_facts": atomic_facts,
         "candidates": candidates,
     }
+    if model_runtime is not None:
+        response["model_runtime"] = model_runtime
+    return response

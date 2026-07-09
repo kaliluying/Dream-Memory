@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dream Memory 配置</title>
+  <style>
+    :root { --ink:#18211d; --paper:#f7f3ea; --panel:#fffdf8; --line:#ddd2c1; --muted:#736b5f; --green:#2f6b4f; --green-soft:#e6f1ea; --amber:#8a6118; --amber-soft:#fff3cf; --red:#a9473f; --red-soft:#f8ded9; --shadow:0 18px 50px rgba(47,39,27,.10); }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--paper); color:var(--ink); font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input,select,textarea { font:inherit; }
+    input,select,textarea { width:100%; border:1px solid var(--line); border-radius:8px; background:#fffaf1; color:var(--ink); padding:10px 11px; }
+    textarea { min-height:132px; line-height:1.5; resize:vertical; font-family:"Cascadia Mono",Consolas,monospace; }
+    button { min-height:40px; border:1px solid transparent; border-radius:8px; padding:9px 13px; font-weight:800; cursor:pointer; }
+    button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible { outline:3px solid rgba(47,107,79,.24); outline-offset:2px; }
+    .shell { min-height:100vh; display:grid; grid-template-columns:280px minmax(0,1fr); }
+    .sidebar { padding:24px 18px; color:#eef1e8; background:linear-gradient(180deg,#17201c 0%,#223027 100%); }
+    .brand { display:grid; gap:8px; padding-bottom:18px; border-bottom:1px solid rgba(255,255,255,.12); }
+    .brand h1 { margin:0; font-size:28px; line-height:1; }
+    .brand p { margin:0; color:#b7c2b4; font-size:13px; line-height:1.55; }
+    .nav { display:grid; gap:8px; margin-top:20px; }
+    .nav a { color:#edf3e9; text-decoration:none; border:1px solid rgba(255,255,255,.12); border-radius:9px; padding:10px 11px; background:rgba(255,255,255,.055); font-weight:800; }
+    .content { min-width:0; padding:28px 32px 36px; }
+    .hero { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; margin-bottom:18px; }
+    .hero h2 { margin:0; font-size:36px; letter-spacing:0; }
+    .hero p { margin:8px 0 0; color:var(--muted); }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button:disabled { opacity:.68; cursor:progress; }
+    .primary { background:var(--green); color:#fff; }
+    .secondary { background:#fffaf2; color:var(--ink); border-color:var(--line); }
+    .danger { background:var(--red); color:#fff; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .card { border:1px solid var(--line); border-radius:10px; background:var(--panel); box-shadow:var(--shadow); padding:18px; }
+    .card h3 { margin:0 0 5px; font-size:17px; }
+    .card p { margin:0 0 14px; color:var(--muted); font-size:13px; line-height:1.5; }
+    .fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .profile-list { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px; }
+    .profile-chip { min-height:34px; padding:7px 10px; border-color:var(--line); background:#fffaf2; color:var(--ink); }
+    .profile-chip.active { background:var(--green); color:#fff; border-color:var(--green); }
+    label { display:grid; gap:6px; color:#4e463d; font-size:12px; font-weight:850; letter-spacing:0; }
+    .wide { grid-column:1 / -1; }
+    .check { display:flex; align-items:center; gap:8px; min-height:40px; text-transform:none; letter-spacing:0; font-size:13px; }
+    .check input[type="checkbox"] { flex:0 0 16px; width:16px; height:16px; min-height:0; margin:0; padding:0; }
+    .status { min-height:24px; margin:12px 0 0; color:var(--muted); font-size:13px; }
+    .status-banner { position:sticky; top:12px; z-index:3; margin:-4px 0 18px; padding:12px 14px; border:1px solid var(--line); border-radius:10px; background:#fffaf2; box-shadow:0 8px 26px rgba(47,39,27,.08); color:var(--ink); font-weight:750; }
+    .status.ok { color:var(--green); border-color:#b8d8c2; background:var(--green-soft); }
+    .status.error { color:var(--red); border-color:#e7aaa2; background:var(--red-soft); }
+    .status.loading { color:var(--amber); border-color:#ecd08a; background:var(--amber-soft); }
+    code { background:#f1eadf; padding:2px 5px; border-radius:6px; }
+    @media (max-width:980px) { .shell { display:block; } .grid,.fields { grid-template-columns:1fr; } .hero { display:grid; } .content { padding:22px 16px; } }
+  </style>
+</head>
+<body>
+<main class="shell">
+  <aside class="sidebar">
+    <div class="brand"><h1>Dream Memory 配置</h1><p>把命令行参数集中到一个可保存的配置页，默认写入 <code>.dream-memory/config.json</code>。</p></div>
+    <nav class="nav"><a href="/memory-review">候选审核</a><a href="/memory-config">配置页面</a></nav>
+  </aside>
+  <section class="content">
+    <header class="hero">
+      <div><h2>运行与模型配置</h2><p>覆盖 init / scan / import / dream / review / apply / run / status / resume / trace / context / summary / export / eval / check-provider 的参数。</p></div>
+      <div class="actions"><button class="primary" onclick="saveConfig(event)">保存配置</button><button class="secondary" onclick="loadConfig(event)">重新加载</button><button class="danger" onclick="resetConfig(event)">恢复默认</button></div>
+    </header>
+    <div id="status" class="status status-banner">正在加载配置...</div>
+    <div class="grid">
+      <section class="card"><h3>模型配置</h3><p>配置多个模型配置档，重试失败时会按备用配置链依次切换。</p><div id="profileList" class="profile-list"></div><div class="fields">
+        <label>当前配置档 <select id="activeProfile" onchange="switchActiveProfile(this.value)"></select></label>
+        <div class="actions"><button type="button" class="secondary" onclick="addProfile()">新增配置档</button><button type="button" class="danger" onclick="deleteProfile()">删除配置档</button></div>
+        <label>模型服务商 <select id="provider" onchange="refreshModelList()"><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option></select></label>
+        <label>模型名称 <select id="model"><option value="">点击获取模型列表后选择</option></select></label>
+        <div class="wide actions"><button type="button" class="secondary" onclick="loadModelCatalog(event)">获取模型列表</button></div>
+        <label class="wide">接口密钥 <input id="apiKey" type="password" placeholder="直接写入 config.json" /></label>
+        <label>密钥环境变量 <input id="apiKeyEnv" placeholder="OPENAI_API_KEY" /></label>
+        <label>接口地址 <input id="baseUrl" placeholder="http://localhost:3000" /></label>
+        <label>超时秒数 <input id="timeoutSeconds" type="number" min="1" /></label>
+        <label>检查配置档 <select id="checkProviderProfile"></select></label>
+        <label class="check"><input id="checkProviderInvoke" type="checkbox" /> 检查时调用模型</label>
+        <label class="check"><input id="checkProviderAll" type="checkbox" /> 检查全部配置档</label>
+      </div></section>
+      <section class="card"><h3>重试与切换</h3><p>对应 <code>model_policy.default_profile</code>、<code>fallback_chain</code> 和 retry。</p><div class="fields">
+        <label>默认配置档 <select id="defaultProfile"></select></label>
+        <label>备用配置链 <input id="fallbackChain" placeholder="primary,backup" /></label>
+        <label>最大重试次数 <input id="retryMaxAttempts" type="number" min="1" /></label>
+        <label>初始等待秒数 <input id="retryInitialDelay" type="number" min="0" step="0.1" /></label>
+        <label>退避倍数 <input id="retryBackoff" type="number" min="1" step="0.1" /></label>
+        <label>最长等待秒数 <input id="retryMaxDelay" type="number" min="0" step="0.1" /></label>
+        <label class="wide">重试状态码 <input id="retryStatus" placeholder="429,500,502,503,504" /></label>
+        <label class="check"><input id="retryTimeout" type="checkbox" /> 超时后重试</label>
+        <label class="check"><input id="retrySwitchModel" type="checkbox" /> 允许切换模型进行重试</label>
+        <label class="check"><input id="allowRulesFallback" type="checkbox" /> 允许规则兜底</label>
+      </div></section>
+      <section class="card"><h3>导入与扫描</h3><p>对应 <code>--codex-home --claude-home --claude-state --project --output-dir</code>。</p><div class="fields">
+        <label>Codex 目录 <input id="codexHome" /></label>
+        <label>Claude 目录 <input id="claudeHome" /></label>
+        <label>Claude 状态文件 <input id="claudeState" /></label>
+        <label>导入输出目录 <input id="importsOutputDir" /></label>
+        <label class="wide">项目根目录 <input id="projectRoots" placeholder="多个路径用逗号分隔" /></label>
+      </div></section>
+      <section class="card"><h3>运行参数</h3><p>对应 <code>run/dream/pipeline --input --project --mode --dry-run --invoke-model --memory-cards</code>。</p><div class="fields">
+        <label>默认事件文件 <input id="defaultInput" /></label>
+        <label>默认项目 <input id="defaultProject" placeholder=". 或留空" /></label>
+        <label>运行模式 <select id="mode"><option value="ai">AI</option><option value="rules">规则</option></select></label>
+        <label>记忆卡片文件 <input id="memoryCards" /></label>
+        <label>输出目录 <input id="outputDir" /></label>
+        <label class="check"><input id="invokeModel" type="checkbox" /> 调用模型</label>
+      </div></section>
+      <section class="card"><h3>上下文与导出</h3><p>对应 <code>context --limit --format</code> 与 <code>export --target --scope --output-dir --limit</code>。</p><div class="fields">
+        <label>上下文条数 <input id="contextLimit" type="number" min="1" /></label>
+        <label>上下文格式 <select id="contextFormat"><option value="json">JSON</option><option value="markdown">Markdown</option></select></label>
+        <label>导出目标 <select id="exportTarget"><option value="both">Codex 和 Claude</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+        <label>导出范围 <select id="exportScope"><option value="project">当前项目</option><option value="global">全局</option></select></label>
+        <label>导出条数 <input id="exportLimit" type="number" min="1" /></label>
+        <label>导出目录 <input id="exportOutputDir" /></label>
+        <label class="check"><input id="autoExport" type="checkbox" /> 自动导出</label>
+      </div></section>
+      <section class="card"><h3>审核与应用</h3><p>对应 <code>review --candidates</code>、<code>apply --reviewed</code>、<code>resume --reviewed --reviewer</code>。</p><div class="fields">
+        <label>候选文件 <input id="reviewCandidates" /></label>
+        <label>审核结果文件 <input id="applyReviewed" /></label>
+        <label>恢复用审核文件 <input id="resumeReviewed" /></label>
+        <label>审核人 <input id="reviewer" /></label>
+      </div></section>
+      <section class="card"><h3>状态与追踪</h3><p>对应 <code>status --run-id</code>、<code>resume --run-id</code>、<code>trace --run-id --candidate-id</code>。</p><div class="fields">
+        <label>状态 Run ID <input id="statusRunId" /></label>
+        <label>恢复 Run ID <input id="resumeRunId" /></label>
+        <label>Trace Run ID <input id="traceRunId" /></label>
+        <label>Trace 候选 ID <input id="traceCandidateId" /></label>
+      </div></section>
+      <section class="card"><h3>初始化与评估</h3><p>对应 <code>init</code>、<code>init-config</code>、<code>extract-facts</code>、<code>summary</code>、<code>eval</code>。</p><div class="fields">
+        <label>初始化路径 <input id="initPath" /></label>
+        <label>初始配置输出 <input id="initConfigOutput" /></label>
+        <label>扫描输出 <input id="scanOutput" /></label>
+        <label>导入来源 <select id="importSource"><option value="all">全部</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+        <label>事实抽取输入 <input id="extractInput" /></label>
+        <label>事实抽取项目 <input id="extractProject" /></label>
+        <label>事实抽取输出目录 <input id="extractOutputDir" /></label>
+        <label>汇总范围 <select id="summaryScope"><option value="all-projects">所有项目</option></select></label>
+        <label>汇总输出 <input id="summaryOutput" /></label>
+        <label>评估输入 <input id="evalInput" /></label>
+        <label>评估项目 <input id="evalProject" /></label>
+        <label>评估模式 <select id="evalMode"><option value="rules">规则</option><option value="ai">AI</option></select></label>
+        <label>评估输出 <input id="evalOutput" /></label>
+        <label class="check"><input id="initForce" type="checkbox" /> 强制初始化</label>
+        <label class="check"><input id="importDryRun" type="checkbox" /> 导入试运行</label>
+        <label class="check"><input id="dreamApply" type="checkbox" /> 抽取后应用</label>
+      </div></section>
+      <section class="card"><h3>原始 JSON</h3><p>高级用户可以直接编辑完整配置。保存时会做结构校验。</p><textarea id="rawConfig"></textarea></section>
+    </div>
+  </section>
+</main>
+<script>
+let currentConfig=null;let modelCatalog={};let activeProfile='primary';
+async function loadConfig(event){await withBusyStatus(event&&event.currentTarget,'正在加载配置...',async()=>{const res=await fetch('/api/memory/config');const data=await res.json();if(!res.ok)throw new Error(data.detail||JSON.stringify(data));currentConfig=data.config;activeProfile=profileNames()[0]||'primary';fillForm(currentConfig);setStatus(`已加载 ${data.config_path}`,'ok');},'加载失败');}
+async function saveConfig(event){await withBusyStatus(event&&event.currentTarget,'正在保存配置...',async()=>{const config=collectForm();const res=await fetch('/api/memory/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({config})});const data=await res.json();if(!res.ok)throw new Error(data.detail||JSON.stringify(data));currentConfig=data.config;fillForm(currentConfig);setStatus('配置已保存','ok');},'保存失败');}
+async function resetConfig(event){await withBusyStatus(event&&event.currentTarget,'正在恢复默认配置...',async()=>{const res=await fetch('/api/memory/config/reset',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||JSON.stringify(data));currentConfig=data.config;activeProfile=profileNames()[0]||'primary';fillForm(currentConfig);setStatus('已恢复默认配置','ok');},'重置失败');}
+async function loadModelCatalog(event){syncActiveProfile();await withBusyStatus(event&&event.currentTarget,'正在获取模型列表...',async()=>{const request={provider:value('provider')||'anthropic',model:value('model')||modelValueFromConfig(),api_key:value('apiKey'),api_key_env:nullIfEmpty(value('apiKeyEnv')),base_url:nullIfEmpty(value('baseUrl')),timeout_seconds:numberValue('timeoutSeconds',60)};const res=await fetch('/api/memory/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});const data=await res.json();if(!res.ok)throw new Error(data.detail||JSON.stringify(data));modelCatalog[data.provider]=data.models||[];refreshModelList();setStatus(`模型列表已获取：${(data.models||[]).length} 个模型`,'ok');},'模型列表加载失败');}
+function addProfile(){syncActiveProfile();const raw=prompt('请输入新配置档名称，例如 backup');const name=safeProfileName(raw);if(!name){setStatus('新增失败：配置档名称只能使用字母、数字、下划线和短横线','error');return;}currentConfig=currentConfig||{};currentConfig.models=currentConfig.models||{};if(currentConfig.models[name]){setStatus(`新增失败：配置档 ${name} 已存在`,'error');return;}const source=currentProfile();currentConfig.models[name]={provider:source.provider||'openai',model:source.model||'',api_key:'',api_key_env:null,base_url:source.base_url||null,timeout_seconds:source.timeout_seconds||60};activeProfile=name;refreshProfileSelectors();fillActiveProfile();updateRawConfig();setStatus(`已新增配置档 ${name}`,'ok');}
+function deleteProfile(){if(!currentConfig||!currentConfig.models)return;const names=profileNames();if(names.length<=1){setStatus('至少需要保留一个模型配置档','error');return;}const name=activeProfile;if(!confirm(`删除配置档 ${name}？`))return;delete currentConfig.models[name];const policy=currentConfig.model_policy||{};if(policy.default_profile===name)policy.default_profile=profileNames()[0];policy.fallback_chain=(policy.fallback_chain||[]).filter(item=>item!==name);if(policy.fallback_chain.length===0)policy.fallback_chain=[policy.default_profile];if(currentConfig.check_provider_profile===name)currentConfig.check_provider_profile=policy.default_profile;activeProfile=policy.default_profile;refreshProfileSelectors();fillActiveProfile();updateRawConfig();setStatus(`已删除配置档 ${name}`,'ok');}
+function switchActiveProfile(name){syncActiveProfile();activeProfile=name;fillActiveProfile();refreshProfileSelectors();setStatus(`正在编辑配置档 ${name}`,'loading');}
+function syncActiveProfile(){if(!currentConfig)return;currentConfig.models=currentConfig.models||{};currentConfig.models[activeProfile]={provider:value('provider')||'anthropic',model:value('model'),api_key:value('apiKey'),api_key_env:nullIfEmpty(value('apiKeyEnv')),base_url:nullIfEmpty(value('baseUrl')),timeout_seconds:numberValue('timeoutSeconds',60)};}
+function refreshModelList(){const provider=value('provider')||'anthropic';const select=document.getElementById('model');const selected=select.value||modelValueFromConfig();const models=modelCatalog[provider]||[];const options=[];if(selected&&!models.includes(selected)){options.push(`<option value="${escapeAttr(selected)}">${escapeHtml(selected)}（当前配置）</option>`);}if(models.length===0){options.push('<option value="">点击获取模型列表后选择</option>');}else{options.push('<option value="">请选择模型</option>');options.push(...models.map(model=>`<option value="${escapeAttr(model)}">${escapeHtml(model)}</option>`));}select.innerHTML=options.join('');select.value=selected||'';}
+function refreshProfileSelectors(){const names=profileNames();const optionHtml=names.map(name=>`<option value="${escapeAttr(name)}">${escapeHtml(name)}</option>`).join('');setSelectOptions('activeProfile',optionHtml,activeProfile);setSelectOptions('defaultProfile',optionHtml,(currentConfig.model_policy||{}).default_profile||activeProfile);setSelectOptions('checkProviderProfile',optionHtml,currentConfig.check_provider_profile||activeProfile);const list=document.getElementById('profileList');list.innerHTML=names.map(name=>`<button type="button" class="profile-chip ${name===activeProfile?'active':''}" onclick="switchActiveProfile('${escapeJs(name)}')">${escapeHtml(name)}</button>`).join('');}
+function modelValueFromConfig(){return (currentProfile()||{}).model||'';}
+function currentProfile(){return ((currentConfig||{}).models||{})[activeProfile]||{};}
+function profileNames(){return Object.keys(((currentConfig||{}).models)||{});}
+function fillActiveProfile(){const profile=currentProfile();setValue('provider',profile.provider||'anthropic');setValue('apiKey',profile.api_key);setValue('apiKeyEnv',profile.api_key_env);setValue('baseUrl',profile.base_url);setValue('timeoutSeconds',profile.timeout_seconds);refreshModelList();setValue('model',profile.model);}
+function fillForm(config){const policy=config.model_policy||{};const retry=policy.retry||{};activeProfile=activeProfile&&config.models&&config.models[activeProfile]?activeProfile:(policy.default_profile||Object.keys(config.models||{})[0]||'primary');refreshProfileSelectors();fillActiveProfile();setChecked('checkProviderInvoke',config.check_provider_invoke);setChecked('checkProviderAll',config.check_provider_all);setValue('fallbackChain',(policy.fallback_chain||[]).join(','));setValue('retryMaxAttempts',retry.max_attempts);setValue('retryInitialDelay',retry.initial_delay_seconds);setValue('retryBackoff',retry.backoff_factor);setValue('retryMaxDelay',retry.max_delay_seconds);setValue('retryStatus',(retry.retry_on_status||[]).join(','));setChecked('retryTimeout',retry.retry_on_timeout);setChecked('retrySwitchModel',retry.switch_model_on_retry);setChecked('allowRulesFallback',policy.allow_rules_fallback);setValue('codexHome',config.codex_home);setValue('claudeHome',config.claude_home);setValue('claudeState',config.claude_state);setValue('importsOutputDir',config.imports_output_dir);setValue('projectRoots',(config.project_roots||[]).join(','));setValue('defaultInput',config.default_input||'.dream-memory/imports/all-events.jsonl');setValue('defaultProject',config.default_project||'.');setValue('mode',config.mode);setValue('memoryCards',config.memory_cards);setValue('outputDir',config.output_dir);setChecked('invokeModel',config.invoke_model);setValue('contextLimit',config.context_limit);setValue('contextFormat',config.context_format);setValue('exportTarget',config.export_target);setValue('exportScope',config.export_scope);setValue('exportLimit',config.export_limit);setValue('exportOutputDir',config.export_output_dir);setChecked('autoExport',config.auto_export);setValue('reviewCandidates',config.review_candidates);setValue('applyReviewed',config.apply_reviewed);setValue('resumeReviewed',config.resume_reviewed);setValue('reviewer',config.reviewer);setValue('statusRunId',config.status_run_id);setValue('resumeRunId',config.resume_run_id);setValue('traceRunId',config.trace_run_id);setValue('traceCandidateId',config.trace_candidate_id);setValue('initPath',config.init_path);setValue('initConfigOutput',config.init_config_output);setValue('scanOutput',config.scan_output);setValue('importSource',config.import_source);setValue('extractInput',config.extract_input);setValue('extractProject',config.extract_project);setValue('extractOutputDir',config.extract_output_dir);setValue('summaryScope',config.summary_scope);setValue('summaryOutput',config.summary_output);setValue('evalInput',config.eval_input);setValue('evalProject',config.eval_project);setValue('evalMode',config.eval_mode);setValue('evalOutput',config.eval_output);setChecked('initForce',config.init_force);setChecked('importDryRun',config.import_dry_run);setChecked('dreamApply',config.dream_apply);updateRawConfig();}
+function collectForm(){let config;const raw=document.getElementById('rawConfig').value.trim();try{config=raw?JSON.parse(raw):structuredClone(currentConfig||{});}catch(error){throw new Error('原始 JSON 不是合法 JSON');}syncActiveProfile();config.models=structuredClone(currentConfig.models||{});config.model_policy=config.model_policy||{};config.model_policy.retry=config.model_policy.retry||{};config.check_provider_profile=value('checkProviderProfile')||activeProfile;config.check_provider_invoke=checked('checkProviderInvoke');config.check_provider_all=checked('checkProviderAll');config.model_policy.default_profile=value('defaultProfile')||activeProfile;config.model_policy.fallback_chain=splitList(value('fallbackChain'));if(!config.model_policy.fallback_chain.includes(config.model_policy.default_profile)){config.model_policy.fallback_chain=[config.model_policy.default_profile,...config.model_policy.fallback_chain];}config.model_policy.retry.max_attempts=numberValue('retryMaxAttempts',3);config.model_policy.retry.initial_delay_seconds=numberValue('retryInitialDelay',1);config.model_policy.retry.backoff_factor=numberValue('retryBackoff',2);config.model_policy.retry.max_delay_seconds=numberValue('retryMaxDelay',8);config.model_policy.retry.retry_on_status=splitList(value('retryStatus')).map(Number).filter(Number.isFinite);config.model_policy.retry.retry_on_timeout=checked('retryTimeout');config.model_policy.retry.switch_model_on_retry=checked('retrySwitchModel');config.model_policy.allow_rules_fallback=checked('allowRulesFallback');config.codex_home=value('codexHome');config.claude_home=value('claudeHome');config.claude_state=value('claudeState');config.imports_output_dir=value('importsOutputDir');config.project_roots=splitList(value('projectRoots'));config.default_input=value('defaultInput');config.default_project=nullIfEmpty(value('defaultProject'));config.mode=value('mode');config.memory_cards=value('memoryCards');config.output_dir=value('outputDir');config.invoke_model=checked('invokeModel');config.context_limit=numberValue('contextLimit',12);config.context_format=value('contextFormat');config.export_target=value('exportTarget');config.export_scope=value('exportScope');config.export_limit=nullableNumberValue('exportLimit');config.export_output_dir=nullIfEmpty(value('exportOutputDir'));config.auto_export=checked('autoExport');config.review_candidates=value('reviewCandidates');config.apply_reviewed=value('applyReviewed');config.resume_reviewed=nullIfEmpty(value('resumeReviewed'));config.reviewer=value('reviewer')||'user';config.status_run_id=nullIfEmpty(value('statusRunId'));config.resume_run_id=nullIfEmpty(value('resumeRunId'));config.trace_run_id=nullIfEmpty(value('traceRunId'));config.trace_candidate_id=nullIfEmpty(value('traceCandidateId'));config.init_path=value('initPath')||'.';config.init_config_output=value('initConfigOutput')||'.dream-memory/config.json';config.scan_output=nullIfEmpty(value('scanOutput'));config.import_source=value('importSource')||'all';config.extract_input=value('extractInput');config.extract_project=nullIfEmpty(value('extractProject'));config.extract_output_dir=value('extractOutputDir');config.summary_scope=value('summaryScope')||'all-projects';config.summary_output=nullIfEmpty(value('summaryOutput'));config.eval_input=nullIfEmpty(value('evalInput'));config.eval_project=nullIfEmpty(value('evalProject'));config.eval_mode=value('evalMode')||'rules';config.eval_output=nullIfEmpty(value('evalOutput'));config.init_force=checked('initForce');config.import_dry_run=checked('importDryRun');config.dream_apply=checked('dreamApply');currentConfig=config;return config;}
+function value(id){return document.getElementById(id).value.trim();}
+function setValue(id,value){document.getElementById(id).value=value==null?'':String(value);}
+function setSelectOptions(id,html,value){const el=document.getElementById(id);el.innerHTML=html;el.value=value||'';}
+function checked(id){return document.getElementById(id).checked;}
+function setChecked(id,value){document.getElementById(id).checked=Boolean(value);}
+function splitList(text){return String(text||'').split(',').map(item=>item.trim()).filter(Boolean);}
+function nullIfEmpty(text){const value=String(text||'').trim();return value?value:null;}
+function numberValue(id,fallback){const parsed=Number(value(id));return Number.isFinite(parsed)?parsed:fallback;}
+function nullableNumberValue(id){const raw=value(id);if(!raw)return null;const parsed=Number(raw);return Number.isFinite(parsed)?parsed:null;}
+function escapeHtml(text){return String(text).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function escapeAttr(text){return String(text).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function escapeJs(text){return String(text).replaceAll(String.fromCharCode(92),String.fromCharCode(92,92)).replaceAll("'",String.fromCharCode(92)+"'");}
+function safeProfileName(text){const value=String(text||'').trim();return /^[A-Za-z0-9_-]+$/.test(value)?value:'';}
+function updateRawConfig(){setValue('rawConfig',JSON.stringify(currentConfig,null,2));}
+function setStatus(text,tone){const el=document.getElementById('status');el.textContent=text;el.className=`status status-banner ${tone||''}`;}
+async function withBusyStatus(button,message,operation,errorPrefix){const oldText=button&&button.textContent;try{setStatus(message,'loading');if(button){button.disabled=true;button.textContent='处理中...';}await operation();}catch(error){setStatus(`${errorPrefix}：${error.message}`,'error');}finally{if(button){button.disabled=false;button.textContent=oldText;}}}
+loadConfig();
+</script>
+</body>
+</html>

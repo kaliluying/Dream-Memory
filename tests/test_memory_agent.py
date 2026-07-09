@@ -11,6 +11,14 @@ from dream_memory.memory_agent import (
 )
 
 
+class FakeChatModel:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def invoke(self, prompt):
+        return {"content": self.responses.pop(0)}
+
+
 class MemoryAgentTests(unittest.TestCase):
     def test_build_memory_extraction_prompt_contains_schema_and_events(self):
         events = [{"source": "codex", "role": "user", "content": "希望项目像 Claude Code", "project": "/tmp/p"}]
@@ -49,9 +57,7 @@ class MemoryAgentTests(unittest.TestCase):
         self.assertIn("prompt", result)
 
     def test_agent_extract_with_fake_model_returns_candidates(self):
-        from langchain_core.language_models.fake_chat_models import FakeListChatModel
-
-        model = FakeListChatModel(responses=[json.dumps({
+        model = FakeChatModel(responses=[json.dumps({
             "candidates": [
                 {
                     "content": "用户希望项目做成 Claude Code 风格的本地研发助手。",
@@ -79,9 +85,7 @@ class MemoryAgentTests(unittest.TestCase):
         self.assertIn("Claude Code", result["candidates"][0]["content"])
 
     def test_agent_extract_aggregates_atomic_facts_into_candidates(self):
-        from langchain_core.language_models.fake_chat_models import FakeListChatModel
-
-        model = FakeListChatModel(responses=[json.dumps({
+        model = FakeChatModel(responses=[json.dumps({
             "atomic_facts": [
                 {
                     "statement": "用户希望项目做成 Claude Code 风格的本地研发助手。",

@@ -7,12 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
-
-
-class MemoryModelProvider(Protocol):
-    def invoke(self, prompt: str) -> str:
-        ...
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -255,19 +250,23 @@ def parse_model_ref(
     return ProviderConfig(provider="anthropic", model=model_ref, api_key_env=api_key_env, api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds)
 
 
-def build_model_provider(config: ProviderConfig) -> MemoryModelProvider:
+def build_model_provider(config: ProviderConfig) -> Callable[[str], str]:
     if config.provider == "anthropic":
-        return AnthropicProvider(config)
+        return AnthropicProvider(config).invoke
     if config.provider in {"openai", "openrouter"}:
-        return OpenAICompatibleProvider(config)
+        return OpenAICompatibleProvider(config).invoke
     raise ValueError(f"Unsupported model provider: {config.provider}")
+
+
+def _call_provider(provider: Callable[[str], str] | Any, prompt: str) -> str:
+    return provider(prompt) if callable(provider) else provider.invoke(prompt)
 
 
 class ModelRuntime:
     def __init__(
         self,
         *,
-        provider_factory: Callable[[ProviderConfig], MemoryModelProvider] = build_model_provider,
+        provider_factory: Callable[[ProviderConfig], Callable[[str], str] | Any] = build_model_provider,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.provider_factory = provider_factory
@@ -426,7 +425,8 @@ class ModelRuntime:
             )
             started = time.monotonic()
             try:
-                text = self.provider_factory(profile.config).invoke(prompt)
+                provider = self.provider_factory(profile.config)
+                text = _call_provider(provider, prompt)
             except Exception as exc:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 retryable = self._is_retryable(exc, policy.retry)
@@ -562,7 +562,7 @@ def invoke_model(
     env_timeout = os.environ.get("DEEPAGENT_MEMORY_TIMEOUT_SECONDS")
     timeout = int(env_timeout) if env_timeout else timeout_seconds
     config = parse_model_ref(model, provider=provider, api_key_env=api_key_env or env_api_key, api_key=api_key, base_url=base_url or env_base_url, timeout_seconds=timeout)
-    return build_model_provider(config).invoke(prompt)
+    return _call_provider(build_model_provider(config), prompt)
 
 
 def list_provider_models(config: ProviderConfig) -> list[str]:

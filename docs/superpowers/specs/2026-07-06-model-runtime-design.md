@@ -2,7 +2,7 @@
 
 ## Context
 
-Dream Memory currently has a single active model configuration made of `provider`, `model`, `api_key_env`, `base_url`, `timeout_seconds`, and `invoke_model`. The CLI merges command-line overrides over `.dream-memory/config.json`, converts the active provider and model into a `provider:model` string, and passes that into the LangGraph extraction path. The provider layer performs one HTTP request through `urllib.request.urlopen` and raises on HTTP failures.
+Dream Memory currently has a single active model configuration made of `provider`, `model`, `api_key_env`, `base_url`, `timeout_seconds`, and `invoke_model`. The CLI merges command-line overrides over `.dream-memory/config.json`, converts the active provider and model into a `provider:model` string, and passes that into the direct extraction path. The provider layer performs one HTTP request through `urllib.request.urlopen` and raises on HTTP failures.
 
 This is simple and easy to understand, but too fragile for a memory extraction workflow. A temporary provider outage, rate limit, or model-specific parse failure can stop an entire run. It also leaves little evidence about which model was tried, how long it took, why it failed, or whether a fallback was used.
 
@@ -81,7 +81,7 @@ Core objects:
 - `ModelRuntimeResult`: final text plus selected profile, attempts, fallback metadata, and elapsed time.
 - `ModelRuntime`: orchestrates retries and profile fallback while delegating actual HTTP calls to provider classes.
 
-The existing `invoke_model(prompt, model=...) -> str` can remain as a compatibility wrapper. A new `invoke_model_runtime(prompt, runtime_config, trace_callback=None) -> ModelRuntimeResult` should be used by the CLI and LangGraph path once the config is available.
+The existing `invoke_model(prompt, model=...) -> str` can remain as a compatibility wrapper. A new `invoke_model_runtime(prompt, runtime_config, trace_callback=None) -> ModelRuntimeResult` should be used by the CLI and direct extraction path once the config is available.
 
 ## Data Flow
 
@@ -89,7 +89,7 @@ The existing `invoke_model(prompt, model=...) -> str` can remain as a compatibil
 2. CLI resolves command-line overrides into either:
    - a configured model policy from `models/model_policy`, or
    - a one-off profile when `--provider` or `--model` is supplied.
-3. The LangGraph `invoke_model` node calls the runtime instead of a single provider request.
+3. The direct model invocation step calls the runtime instead of a single provider request.
 4. Runtime tries each profile in `fallback_chain`.
 5. For each profile, runtime performs retry attempts according to `RetryPolicy`.
 6. On success, runtime returns the raw model response and trace metadata.
@@ -179,7 +179,7 @@ The first implementation slice can skip some flags if the config file supports t
 2. Add runtime dataclasses and provider error classes.
 3. Refactor `_post_json` to classify HTTP and timeout errors.
 4. Add `ModelRuntime` retry and fallback orchestration.
-5. Thread runtime metadata through `memory_graph.py`, `memory_agent.py`, and `memory_cli.py`.
+5. Thread runtime metadata through `memory_agent.py` and `memory_cli.py`.
 6. Append model trace events for persistent runs.
 7. Extend `check-provider`.
 8. Update docs and examples.

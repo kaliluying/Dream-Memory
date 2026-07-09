@@ -96,9 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init", help="Initialize a .dream-memory workspace")
     init.add_argument("--path", default=".")
     init.add_argument("--force", action="store_true")
+    init.set_defaults(handler=_handle_init)
 
     init_config = sub.add_parser("init-config", help="Write a default editable memory config file")
     init_config.add_argument("--output", default=str(DEFAULT_CONFIG_PATH))
+    init_config.set_defaults(handler=_handle_init_config)
 
     check_provider = sub.add_parser("check-provider", help="Check provider config, API key, and optionally invoke the model")
     check_provider.add_argument("--provider")
@@ -110,16 +112,19 @@ def build_parser() -> argparse.ArgumentParser:
     check_provider.add_argument("--invoke", action="store_true")
     check_provider.add_argument("--all", action="store_true", help="Check all configured model profiles")
     check_provider.add_argument("--profile", help="Check one configured model profile")
+    check_provider.set_defaults(handler=_handle_check_provider)
 
     scan = sub.add_parser("scan", help="Scan available Codex/Claude sources")
     _add_source_args(scan)
     scan.add_argument("--output")
+    scan.set_defaults(handler=_handle_scan)
 
     imp = sub.add_parser("import", help="Import normalized events")
     _add_source_args(imp)
     imp.add_argument("source", choices=["codex", "claude", "all"])
     imp.add_argument("--output-dir")
     imp.add_argument("--dry-run", action="store_true")
+    imp.set_defaults(handler=_handle_import)
     dream = sub.add_parser("dream", help="Run memory dreaming over normalized events")
     dream.add_argument("--input", required=True, help="Input normalized events JSONL")
     dream.add_argument("--project")
@@ -136,21 +141,25 @@ def build_parser() -> argparse.ArgumentParser:
     dream.set_defaults(invoke_model=None)
     dream.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
     dream.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
+    dream.set_defaults(handler=_handle_dream)
 
     extract = sub.add_parser("extract-facts", help="Extract atomic facts from normalized events")
     extract.add_argument("--input", required=True)
     extract.add_argument("--project")
     extract.add_argument("--output-dir")
+    extract.set_defaults(handler=_handle_extract_facts)
 
     review = sub.add_parser("review", help="Build review queue items from candidates")
     review.add_argument("--candidates", required=True)
     review.add_argument("--memory-cards")
     review.add_argument("--output-dir")
+    review.set_defaults(handler=_handle_review)
 
     review_summary = sub.add_parser("review-summary", help="Summarize a review queue by action, type, quality, and score")
     review_summary.add_argument("--run-id", help="Run ID whose review_queue.jsonl should be summarized")
     review_summary.add_argument("--review-queue", help="Explicit review_queue.jsonl path")
     review_summary.add_argument("--output-dir")
+    review_summary.set_defaults(handler=_handle_review_summary)
 
     auto_review = sub.add_parser("auto-review", help="Write reviewed decisions for high-confidence run candidates")
     auto_review.add_argument("--run-id", required=True)
@@ -165,12 +174,14 @@ def build_parser() -> argparse.ArgumentParser:
     auto_review.add_argument("--include-review", action="store_true", help="Also approve 'review' candidates with score >= min-score, not just 'create' ones")
     auto_review.add_argument("--force", action="store_true", help="Overwrite an existing reviewed.jsonl output")
     auto_review.add_argument("--dry-run", action="store_true", help="Preview auto-review decisions and skip reasons without writing reviewed.jsonl or mutating run state")
+    auto_review.set_defaults(handler=_handle_auto_review)
 
     apply_cmd = sub.add_parser("apply", help="Apply reviewed memory decisions")
     apply_cmd.add_argument("--reviewed", required=True)
     apply_cmd.add_argument("--memory-cards")
     apply_cmd.add_argument("--output-dir")
     apply_cmd.add_argument("--reviewer", required=True)
+    apply_cmd.set_defaults(handler=_handle_apply)
 
     context = sub.add_parser("context", help="Render task-scoped memory context for agents")
     context.add_argument("--project")
@@ -178,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--limit", type=int)
     context.add_argument("--format", choices=["json", "markdown"])
     context.add_argument("--task", help="Task text used to rank relevant memory")
+    context.set_defaults(handler=_handle_context)
 
     pipeline = sub.add_parser("pipeline", help="Run dream and review in one step")
     pipeline.add_argument("--input", required=True)
@@ -194,6 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.set_defaults(invoke_model=None)
     pipeline.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write the AI prompt only; do not invoke the model")
     pipeline.add_argument("--invoke-model", action="store_true", dest="invoke_model", help="Invoke the model; this is the default")
+    pipeline.set_defaults(handler=_handle_pipeline)
 
     run = sub.add_parser("run", help="Create a persistent resumable Dream Memory run")
     run.add_argument("--input", required=True)
@@ -210,10 +223,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(invoke_model=None)
     run.add_argument("--dry-run", action="store_false", dest="invoke_model")
     run.add_argument("--invoke-model", action="store_true", dest="invoke_model")
+    run.set_defaults(handler=_handle_run)
 
     status = sub.add_parser("status", help="Show one run state or list runs")
     status.add_argument("--run-id")
     status.add_argument("--output-dir")
+    status.set_defaults(handler=_handle_status)
 
     resume = sub.add_parser("resume", help="Resume a run after review decisions are available")
     resume.add_argument("--run-id", required=True)
@@ -221,16 +236,19 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--reviewed")
     resume.add_argument("--memory-cards")
     resume.add_argument("--reviewer", default="user")
+    resume.set_defaults(handler=_handle_resume)
 
     trace = sub.add_parser("trace", help="Print run or candidate trace")
     trace.add_argument("--run-id", required=True)
     trace.add_argument("--candidate-id")
     trace.add_argument("--output-dir")
+    trace.set_defaults(handler=_handle_trace)
 
     summary = sub.add_parser("summary", help="Render all-projects memory summary")
     summary.add_argument("--scope", choices=["all-projects"], default="all-projects")
     summary.add_argument("--memory-cards")
     summary.add_argument("--output")
+    summary.set_defaults(handler=_handle_summary)
 
     export = sub.add_parser("export", help="Export approved memory into AGENTS.md and/or CLAUDE.md")
     export.add_argument("--target", choices=["codex", "claude", "both"], default="both")
@@ -239,12 +257,14 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--memory-cards")
     export.add_argument("--output-dir")
     export.add_argument("--limit", type=int)
+    export.set_defaults(handler=_handle_export)
 
     eval_cmd = sub.add_parser("eval", help="Evaluate extraction quality with labeled JSONL")
     eval_cmd.add_argument("--input", required=True)
     eval_cmd.add_argument("--project")
     eval_cmd.add_argument("--mode", choices=["rules", "ai"], default="rules")
     eval_cmd.add_argument("--output")
+    eval_cmd.set_defaults(handler=_handle_eval)
 
     sync_cmd = sub.add_parser("sync", help="Import, dream, and optionally auto-apply memory in one step")
     sync_cmd.add_argument("--project", default=".")
@@ -261,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_cmd.add_argument("--timeout-seconds", type=int)
     sync_cmd.set_defaults(invoke_model=True)
     sync_cmd.add_argument("--dry-run", action="store_false", dest="invoke_model", help="Write AI prompt only; do not invoke the model")
+    sync_cmd.set_defaults(handler=_handle_sync_command)
 
     return parser
 
@@ -847,241 +868,239 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    config = load_memory_config(args.config)
 
-    if args.command == "init":
-        payload = _init_workspace(args.path, force=bool(args.force))
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "init-config":
-        path = write_default_memory_config(args.output)
-        print(json.dumps({"config_path": str(path)}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "check-provider":
-        if args.all or args.profile:
-            profiles, _ = runtime_parts_from_config(config)
-            selected = [args.profile] if args.profile else list(profiles)
-            diagnostics: dict[str, object] = {}
-            ok = True
-            for profile_name in selected:
-                profile = profiles.get(profile_name)
-                if profile is None:
-                    diagnostics[profile_name] = {"ok": False, "error": f"unknown profile: {profile_name}"}
-                    ok = False
-                    continue
-                item = provider_diagnostics(
-                    provider=profile.config.provider,
-                    model=profile.config.model,
-                    api_key_env=profile.config.api_key_env,
-                    api_key=profile.config.api_key,
-                    base_url=profile.config.base_url,
-                    timeout_seconds=profile.config.timeout_seconds,
-                    invoke=bool(args.invoke),
-                )
-                diagnostics[profile_name] = item
-                ok = ok and bool(item.get("ok"))
-            print(json.dumps({"profiles": diagnostics, "ok": ok}, ensure_ascii=False, indent=2))
-            return 0 if ok else 1
-        profiles, policy = runtime_parts_from_config(_runtime_config_from_args(args, config))
-        profile = profiles[policy.default_profile].config
-        provider = profile.provider
-        model = profile.model
-        api_key_env = profile.api_key_env
-        api_key = profile.api_key
-        base_url = profile.base_url
-        timeout_seconds = profile.timeout_seconds
-        payload = provider_diagnostics(
-            provider=provider,
-            model=model,
-            api_key_env=api_key_env,
-            api_key=api_key,
-            base_url=str(base_url) if base_url else None,
-            timeout_seconds=timeout_seconds,
-            invoke=bool(args.invoke),
-        )
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0 if payload.get("ok") else 1
-
-    if args.command == "sync":
-        payload = _handle_sync(args=args, config=config)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "eval":
-        payload = evaluate_labeled_events(args.input, project=args.project, mode=args.mode)
-        if args.output:
-            output = Path(args.output).expanduser()
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            print(json.dumps({"output": str(output), **{k: payload[k] for k in ("precision", "recall", "f1")}}, ensure_ascii=False, indent=2))
-        else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
+def _print_json(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-    codex, claude = _build_importers(args, config)
-    if args.command == "scan":
-        payload = {"codex": codex.scan(), "claude": claude.scan()}
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-        if args.output:
-            path = Path(args.output).expanduser()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text + "\n", encoding="utf-8")
-        else:
-            print(text)
-        return 0
+def _handle_init(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    _print_json(_init_workspace(args.path, force=bool(args.force)))
+    return 0
 
-    if args.command == "extract-facts":
-        events = load_events_jsonl(Path(args.input))
-        facts = extract_atomic_facts(events, project=args.project)
-        output_dir = _configured_output_dir(args, config)
-        facts_path = write_jsonl_records(facts, output_dir / "facts.jsonl")
-        print(json.dumps({"fact_count": len(facts), "facts_path": str(facts_path)}, ensure_ascii=False, indent=2))
-        return 0
 
-    if args.command == "review":
-        candidates = load_events_jsonl(Path(args.candidates))
-        memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
-        queue = build_review_queue(candidates, memory_cards)
-        output_dir = _configured_output_dir(args, config)
-        queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
-        print(json.dumps({"review_count": len(queue), "review_queue_path": str(queue_path)}, ensure_ascii=False, indent=2))
-        return 0
+def _handle_init_config(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    path = write_default_memory_config(args.output)
+    _print_json({"config_path": str(path)})
+    return 0
 
-    if args.command == "review-summary":
-        output_dir = _configured_output_dir(args, config)
-        if args.review_queue:
-            queue_path = Path(args.review_queue).expanduser()
-        elif args.run_id:
-            state = load_run_state(output_dir, args.run_id)
-            artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
-            queue_path = Path(str(artifacts.get("review_queue_path") or "")).expanduser()
-        else:
-            raise ValueError("review-summary requires --run-id or --review-queue")
-        if not queue_path.exists():
-            raise FileNotFoundError(f"review queue not found: {queue_path}")
-        queue = load_events_jsonl(queue_path)
-        payload = {"review_queue_path": str(queue_path), **_summarize_review_queue(queue)}
-        if args.run_id:
-            payload["run_id"] = args.run_id
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
 
-    if args.command == "auto-review":
-        payload = _auto_review_run(args=args, config=config)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "apply":
-        reviewed = load_events_jsonl(Path(args.reviewed))
-        existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
-        cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
-        output_dir = _configured_output_dir(args, config)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
-        decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
-        memory_path = output_dir / "MEMORY.md"
-        memory_path.write_text(markdown, encoding="utf-8")
-        print(json.dumps({"memory_count": len(cards), "memory_cards_path": str(cards_path), "review_decisions_path": str(decisions_path), "memory_path": str(memory_path), "reviewer": args.reviewer}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "context":
-        memory_cards_path = str(_value(args.memory_cards, config["memory_cards"]))
-        cards = load_events_jsonl(Path(memory_cards_path))
-        payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])), task=args.task)
-        context_format = str(_value(args.format, config["context_format"]))
-        if context_format == "markdown":
-            print(render_context_markdown(payload), end="")
-        else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "pipeline":
-        payload, _ = _run_dream_to_review(args=args, config=config, persistent=False)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "run":
-        payload, _ = _run_dream_to_review(args=args, config=config, persistent=True)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "status":
-        output_dir = _configured_output_dir(args, config)
-        if args.run_id:
-            payload = load_run_state(output_dir, args.run_id)
-        else:
-            payload = {"runs": list_runs(output_dir)}
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "resume":
-        payload = _resume_run(args=args, config=config)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "trace":
-        output_dir = _configured_output_dir(args, config)
-        if args.candidate_id:
-            candidate_path = output_dir / "runs" / args.run_id / "candidates" / f"{args.candidate_id}.json"
-            payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.exists() else {"candidate_id": args.candidate_id, "trace": read_trace(output_dir, args.run_id, candidate_id=args.candidate_id)}
-        else:
-            payload = {"run_id": args.run_id, "trace": read_trace(output_dir, args.run_id)}
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "summary":
-        cards = load_events_jsonl(Path(_memory_cards_path(args, config)))
-        markdown = render_all_projects_summary(cards)
-        if args.output:
-            output = Path(args.output).expanduser()
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(markdown, encoding="utf-8")
-            print(json.dumps({"output": str(output), "scope": args.scope}, ensure_ascii=False, indent=2))
-        else:
-            print(markdown, end="")
-        return 0
-
-    if args.command == "export":
-        payload = _export_memory(args=args, config=config)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "dream":
-        events = load_events_jsonl(Path(args.input))
-        output_dir = _configured_output_dir(args, config)
-        mode = "ai" if args.agent else str(_value(args.mode, config["mode"]))
-        model = _configured_model(args, config)
-        invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
-        runtime_config = _runtime_config_from_args(args, config)
-        _apply_provider_env(args, config)
-        if mode == "ai":
-            extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model, runtime_config=runtime_config)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "ai-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
-            if "raw_response" in extraction:
-                (output_dir / "ai-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
-            result = dream_from_events(
-                events,
-                project=args.project,
-                output_dir=output_dir,
-                apply=bool(args.apply),
-                agent_candidates=list(extraction.get("candidates", [])),
-                agent_mode=True,
+def _handle_check_provider(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    if args.all or args.profile:
+        profiles, _ = runtime_parts_from_config(config)
+        selected = [args.profile] if args.profile else list(profiles)
+        diagnostics: dict[str, object] = {}
+        ok = True
+        for profile_name in selected:
+            profile = profiles.get(profile_name)
+            if profile is None:
+                diagnostics[profile_name] = {"ok": False, "error": f"unknown profile: {profile_name}"}
+                ok = False
+                continue
+            item = provider_diagnostics(
+                provider=profile.config.provider,
+                model=profile.config.model,
+                api_key_env=profile.config.api_key_env,
+                api_key=profile.config.api_key,
+                base_url=profile.config.base_url,
+                timeout_seconds=profile.config.timeout_seconds,
+                invoke=bool(args.invoke),
             )
-            payload = {**result.to_dict(), "mode": "ai", "ai": True, "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(output_dir / "ai-prompt.md")}
-            if "model_runtime" in extraction:
-                payload["model_runtime"] = extraction["model_runtime"]
-        else:
-            result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply))
-            payload = {**result.to_dict(), "mode": "rules"}
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0
+            diagnostics[profile_name] = item
+            ok = ok and bool(item.get("ok"))
+        _print_json({"profiles": diagnostics, "ok": ok})
+        return 0 if ok else 1
 
+    profiles, policy = runtime_parts_from_config(_runtime_config_from_args(args, config))
+    profile = profiles[policy.default_profile].config
+    payload = provider_diagnostics(
+        provider=profile.provider,
+        model=profile.model,
+        api_key_env=profile.api_key_env,
+        api_key=profile.api_key,
+        base_url=str(profile.base_url) if profile.base_url else None,
+        timeout_seconds=profile.timeout_seconds,
+        invoke=bool(args.invoke),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok") else 1
+
+
+def _handle_sync_command(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    _print_json(_handle_sync(args=args, config=config))
+    return 0
+
+
+def _handle_eval(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    payload = evaluate_labeled_events(args.input, project=args.project, mode=args.mode)
+    if args.output:
+        output = Path(args.output).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _print_json({"output": str(output), **{k: payload[k] for k in ("precision", "recall", "f1")}})
+    else:
+        _print_json(payload)
+    return 0
+
+
+def _handle_scan(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    codex, claude = _build_importers(args, config)
+    payload = {"codex": codex.scan(), "claude": claude.scan()}
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    if args.output:
+        path = Path(args.output).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
+def _handle_extract_facts(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    events = load_events_jsonl(Path(args.input))
+    facts = extract_atomic_facts(events, project=args.project)
+    output_dir = _configured_output_dir(args, config)
+    facts_path = write_jsonl_records(facts, output_dir / "facts.jsonl")
+    _print_json({"fact_count": len(facts), "facts_path": str(facts_path)})
+    return 0
+
+
+def _handle_review(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    candidates = load_events_jsonl(Path(args.candidates))
+    memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    queue = build_review_queue(candidates, memory_cards)
+    output_dir = _configured_output_dir(args, config)
+    queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
+    _print_json({"review_count": len(queue), "review_queue_path": str(queue_path)})
+    return 0
+
+
+def _handle_review_summary(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    output_dir = _configured_output_dir(args, config)
+    if args.review_queue:
+        queue_path = Path(args.review_queue).expanduser()
+    elif args.run_id:
+        state = load_run_state(output_dir, args.run_id)
+        artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
+        queue_path = Path(str(artifacts.get("review_queue_path") or "")).expanduser()
+    else:
+        raise ValueError("review-summary requires --run-id or --review-queue")
+    if not queue_path.exists():
+        raise FileNotFoundError(f"review queue not found: {queue_path}")
+    payload = {"review_queue_path": str(queue_path), **_summarize_review_queue(load_events_jsonl(queue_path))}
+    if args.run_id:
+        payload["run_id"] = args.run_id
+    _print_json(payload)
+    return 0
+
+
+def _handle_auto_review(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    _print_json(_auto_review_run(args=args, config=config))
+    return 0
+
+
+def _handle_apply(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    reviewed = load_events_jsonl(Path(args.reviewed))
+    existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
+    output_dir = _configured_output_dir(args, config)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
+    decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
+    memory_path = output_dir / "MEMORY.md"
+    memory_path.write_text(markdown, encoding="utf-8")
+    _print_json({"memory_count": len(cards), "memory_cards_path": str(cards_path), "review_decisions_path": str(decisions_path), "memory_path": str(memory_path), "reviewer": args.reviewer})
+    return 0
+
+
+def _handle_context(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    cards = load_events_jsonl(Path(_memory_cards_path(args, config)))
+    payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])), task=args.task)
+    if str(_value(args.format, config["context_format"])) == "markdown":
+        print(render_context_markdown(payload), end="")
+    else:
+        _print_json(payload)
+    return 0
+
+
+def _handle_pipeline(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    payload, _ = _run_dream_to_review(args=args, config=config, persistent=False)
+    _print_json(payload)
+    return 0
+
+
+def _handle_run(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    payload, _ = _run_dream_to_review(args=args, config=config, persistent=True)
+    _print_json(payload)
+    return 0
+
+
+def _handle_status(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    output_dir = _configured_output_dir(args, config)
+    payload = load_run_state(output_dir, args.run_id) if args.run_id else {"runs": list_runs(output_dir)}
+    _print_json(payload)
+    return 0
+
+
+def _handle_resume(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    _print_json(_resume_run(args=args, config=config))
+    return 0
+
+
+def _handle_trace(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    output_dir = _configured_output_dir(args, config)
+    if args.candidate_id:
+        candidate_path = output_dir / "runs" / args.run_id / "candidates" / f"{args.candidate_id}.json"
+        payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.exists() else {"candidate_id": args.candidate_id, "trace": read_trace(output_dir, args.run_id, candidate_id=args.candidate_id)}
+    else:
+        payload = {"run_id": args.run_id, "trace": read_trace(output_dir, args.run_id)}
+    _print_json(payload)
+    return 0
+
+
+def _handle_summary(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    markdown = render_all_projects_summary(load_events_jsonl(Path(_memory_cards_path(args, config))))
+    if args.output:
+        output = Path(args.output).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(markdown, encoding="utf-8")
+        _print_json({"output": str(output), "scope": args.scope})
+    else:
+        print(markdown, end="")
+    return 0
+
+
+def _handle_export(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    _print_json(_export_memory(args=args, config=config))
+    return 0
+
+
+def _handle_dream(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    events = load_events_jsonl(Path(args.input))
+    output_dir = _configured_output_dir(args, config)
+    mode = "ai" if args.agent else str(_value(args.mode, config["mode"]))
+    model = _configured_model(args, config)
+    invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
+    runtime_config = _runtime_config_from_args(args, config)
+    _apply_provider_env(args, config)
+    if mode == "ai":
+        extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model, runtime_config=runtime_config)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "ai-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
+        if "raw_response" in extraction:
+            (output_dir / "ai-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
+        result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply), agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
+        payload = {**result.to_dict(), "mode": "ai", "ai": True, "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(output_dir / "ai-prompt.md")}
+        if "model_runtime" in extraction:
+            payload["model_runtime"] = extraction["model_runtime"]
+    else:
+        result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply))
+        payload = {**result.to_dict(), "mode": "rules"}
+    _print_json(payload)
+    return 0
+
+
+def _handle_import(*, args: argparse.Namespace, config: dict[str, object]) -> int:
+    codex, claude = _build_importers(args, config)
     output_dir = Path(str(_value(args.output_dir, config["imports_output_dir"]))).expanduser()
     events: list[NormalizedSessionEvent] = []
     written_files: list[str] = []
@@ -1102,21 +1121,23 @@ def main(argv: list[str] | None = None) -> int:
     if project_marker_events:
         events.extend(project_marker_events)
         written_files.append(str(write_events_jsonl(project_marker_events, output_dir / "project-marker-events.jsonl")))
-    combined_name = f"{args.source}-events.jsonl"
-    written_files.append(str(write_events_jsonl(events, output_dir / combined_name)))
+    written_files.append(str(write_events_jsonl(events, output_dir / f"{args.source}-events.jsonl")))
     _write_report(output_dir, {
         "source": args.source,
         "dry_run": bool(args.dry_run),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "event_count": len(events),
         "files": written_files,
-        "next_steps": [
-            "Review normalized events before promoting memory.",
-            "Run future dreaming/consolidation over these events.",
-        ],
+        "next_steps": ["Review normalized events before promoting memory.", "Run future dreaming/consolidation over these events."],
     })
-    print(json.dumps({"event_count": len(events), "output_dir": str(output_dir), "dry_run": bool(args.dry_run)}, ensure_ascii=False, indent=2))
+    _print_json({"event_count": len(events), "output_dir": str(output_dir), "dry_run": bool(args.dry_run)})
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = load_memory_config(args.config)
+    return args.handler(args=args, config=config)
 
 
 if __name__ == "__main__":

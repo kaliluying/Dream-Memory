@@ -752,7 +752,7 @@ class MemoryCliTests(unittest.TestCase):
                 "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
             }, ensure_ascii=False), encoding="utf-8")
 
-            with patch("dream_memory.memory_graph.invoke_model_runtime") as invoke:
+            with patch("dream_memory.memory_agent.invoke_model_runtime") as invoke:
                 exit_code = main(["--config", str(config_path), "dream", "--input", str(events), "--project", str(root), "--dry-run"])
 
             self.assertEqual(exit_code, 0)
@@ -794,7 +794,7 @@ class MemoryCliTests(unittest.TestCase):
                 }]
             }, ensure_ascii=False)
 
-            with patch("dream_memory.memory_graph.invoke_model_runtime") as invoke:
+            with patch("dream_memory.memory_agent.invoke_model_runtime") as invoke:
                 def fake_runtime(prompt, *, runtime_config, trace_callback=None):
                     if trace_callback:
                         trace_callback("model_attempt_started", {"profile": "primary", "provider": "openai", "model": "gpt-4.1", "attempt": 1})

@@ -11,3 +11,6 @@ outputs/
 !.dream-memory/.gitkeep
 AGENTS.md
 CLAUDE.md
+
+.tmp_*.log
+.tmp_*.png

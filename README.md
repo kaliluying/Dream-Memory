@@ -4,7 +4,7 @@ Dream Memory 是一个本地 Dream Memory / 梦境记忆系统，用来从 Claud
 
 ## 功能
 
-AI 抽取路径由 LangGraph 状态图编排：`build_prompt -> invoke_model -> validate_candidates`。
+AI 抽取路径现在由 `memory_agent.py` 直接执行：`build prompt -> invoke model/runtime -> validate candidates`。
 
 
 - 导入 Claude Code / Codex 会话事件
@@ -29,7 +29,7 @@ uv run dream-memory --help
 
 ## 轻量 Provider 配置
 
-项目使用 LangGraph 编排 AI 候选记忆抽取流程，并通过轻量 provider/runtime 层调用模型。当前 provider 支持：
+项目通过轻量 provider/runtime 层直接调用模型并校验 AI 候选记忆。当前 provider 支持：
 
 - `anthropic`
 - `openai`
