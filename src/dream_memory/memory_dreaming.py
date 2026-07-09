@@ -77,6 +77,20 @@ TASK_INTENT_ALIASES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
     (("uv", "依赖", "包管理", "安装", "运行命令", "sync"), ("package-manager", "uv", "python", "包管理", "命令执行")),
     (("fastapi", "后端", "接口", "api", "web 框架", "服务"), ("framework", "fastapi", "python web", "后端", "接口")),
 ]
+DURABLE_MEMORY_MARKERS = [
+    "记住",
+    "始终",
+    "偏好",
+    "必须",
+    "人工审核",
+    "长期记忆",
+    "正式记忆",
+    "按照你的建议",
+    "问我",
+    "直接做",
+    "你决定",
+    "你推荐",
+]
 
 
 @dataclass(frozen=True)
@@ -244,7 +258,11 @@ def derive_behavioral_facts(events: list[dict[str, Any]], *, project: str | None
     "推送", "拉取代码", or "梳理这个项目". These are not good
     standalone memories, but repeated usage is valuable future context.
     """
-    indexed = [(index, dict(event)) for index, event in enumerate(events, start=1)]
+    indexed = [
+        (index, dict(event))
+        for index, event in enumerate(events, start=1)
+        if _event_matches_project_filter(dict(event), project=project)
+    ]
 
     def matches(predicate) -> list[tuple[int, dict[str, Any]]]:
         return [(index, event) for index, event in indexed if _is_user_memory_source(event) and predicate(_event_text(event), event)]
@@ -351,7 +369,7 @@ def _is_short_one_off_requirement(content: str) -> bool:
     normalized = normalize_memory_text(content)
     if len(normalized) > 90:
         return False
-    if any(token in content for token in ["记住", "始终", "偏好", "必须", "人工审核", "长期", "记忆", "按照你的建议", "问我", "直接做", "你决定", "你推荐"]):
+    if any(token in content for token in DURABLE_MEMORY_MARKERS):
         return False
     return bool(SHORT_ONE_OFF_RE.search(content))
 
@@ -446,6 +464,7 @@ def _is_code_or_listing_dump_content(content: str) -> bool:
     return False
 
 def _is_low_value_event_content(content: str) -> bool:
+    has_durable_marker = any(marker in content for marker in DURABLE_MEMORY_MARKERS)
     if LOW_VALUE_EVENT_RE.search(content):
         return True
     if TASK_BRIEF_RE.search(content):
@@ -530,7 +549,7 @@ def _is_low_value_event_content(content: str) -> bool:
         )
         if path_lines / len(lines_c) > 0.6:
             return True
-    if TRANSIENT_QUESTION_RE.search(content) and not any(token in content for token in ["记住", "始终", "偏好", "必须"]):
+    if TRANSIENT_QUESTION_RE.search(content) and not has_durable_marker:
         return True
     # <system_reminder> blocks (localized tags)
     if re.match(r"^<system[_-]?reminder", content, re.I):
@@ -591,7 +610,7 @@ def _is_low_value_event_content(content: str) -> bool:
     if re.search(r"[^\s:]+\.(py|ts|js|vue|go|rs|java):\d+:\s+\S", stripped_c2) and "\n" not in stripped_c2:
         return True
     # content too short to be a memory (< 12 chars after strip)
-    if len(stripped_c2) < 12:
+    if len(stripped_c2) < 12 and not has_durable_marker:
         return True
     # IDE auto-notification (file opened in editor)
     if "<ide_opened_file>" in content or "<ide_selection>" in content:
@@ -741,6 +760,24 @@ def _dedupe_atomic_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             deduped[key] = _merge_fact_evidence(deduped[key], fact)
     return [deduped[key] for key in order]
 
+def _event_matches_project_filter(event: dict[str, Any], *, project: str | None) -> bool:
+    """Return whether an event belongs to the requested project context.
+
+    Project-scoped system metadata from another project must not leak into the
+    current run. User-authored events can still yield user-scope memories such
+    as language preferences or repeated workflow preferences across projects.
+    """
+    if not project or not event.get("project"):
+        return True
+    expected_project = normalize_project_path(project)
+    event_project = normalize_project_path(str(event.get("project")))
+    if not expected_project or not event_project or event_project == expected_project:
+        return True
+    role = _memory_source_role(event)
+    event_type = str(event.get("event_type") or "")
+    return role == "user" or event_type == "global_instruction"
+
+
 def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for index, raw_event in enumerate(events, start=1):
@@ -748,6 +785,8 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
         event.setdefault("event_id", f"event_{index}")
         event_type = str(event.get("event_type") or "")
         if event_type in BLOCKED_EVENT_TYPES:
+            continue
+        if not _event_matches_project_filter(event, project=project):
             continue
         content = str(event.get("content") or "").strip()
         if not content or SENSITIVE_RE.search(content):
@@ -764,6 +803,18 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
             continue
         lowered = content.lower()
         event_project = normalize_project_path(str(event.get("project") or project)) if (event.get("project") or project) else None
+
+        if "不要" in content and "未经审核" in content and "自动写入" in content and ("风险" in content or "方案" in content):
+            facts.append(build_atomic_fact(
+                fact_type="rejected_option",
+                statement="不要把未经审核的候选自动写入长期记忆或 MEMORY.md。",
+                scope="project" if event_project else "global",
+                project=str(event_project) if event_project else None,
+                source_event=event,
+                confidence=0.86,
+                tags=["rejected-option", "memory-safety", "review-gate"],
+            ))
+            continue
 
         if _is_short_one_off_requirement(content):
             continue
@@ -806,7 +857,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                     tags=tags,
                 ))
             if has_unittest or has_pytest:
-                runner = "unittest" if has_unittest else "pytest"
+                runner = "pytest" if has_pytest else "unittest"
                 facts.append(build_atomic_fact(
                     fact_type="workflow",
                     statement=f"Python 测试使用 {runner}，验证时应优先运行对应测试命令。",
@@ -862,6 +913,30 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 source_event=event,
                 confidence=0.88,
                 tags=["autonomy", "direct-execution"],
+            ))
+            continue
+
+        if event_type != "global_instruction" and "中文" in content and ("回答" in content or "回复" in content) and ("偏好" in content or "始终" in content or "请" in content):
+            facts.append(build_atomic_fact(
+                fact_type="preference",
+                statement="用户偏好中文回答。",
+                scope="user",
+                project=None,
+                source_event=event,
+                confidence=0.95,
+                tags=["preference", "language", "chinese"],
+            ))
+            continue
+
+        if "不要只看" in content and ("真实跑" in content or "真实" in content and "验证" in content):
+            facts.append(build_atomic_fact(
+                fact_type="pitfall",
+                statement="不要只看 API 返回成功就判断问题已修复，涉及登录跳转、退出状态等可见产品问题必须真实跑 UI 流程验证。",
+                scope="user",
+                project=None,
+                source_event=event,
+                confidence=0.88,
+                tags=["pitfall", "ui-validation", "real-flow"],
             ))
             continue
 
@@ -1750,6 +1825,23 @@ def _render_memory_preview(candidates: list[dict[str, Any]]) -> str:
             prefix = "Global" if c.get("scope") == "global" else f"Project: {c.get('project')}"
             lines.append(f"- **{prefix} / {c['type']} / {c['score']}**: {c['content']}")
     return "\n".join(lines) + "\n"
+
+
+def render_review_queue_memory_preview(queue: list[dict[str, Any]]) -> str:
+    candidates: list[dict[str, Any]] = []
+    for item in queue:
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        if not candidate:
+            continue
+        normalized = dict(candidate)
+        action = str(item.get("suggested_action") or "")
+        normalized["status"] = _status_from_dream_action(action)
+        if isinstance(item.get("dream_analysis"), dict):
+            normalized["dream_analysis"] = dict(item["dream_analysis"])
+        if isinstance(item.get("quality_signals"), dict):
+            normalized["quality_signals"] = dict(item["quality_signals"])
+        candidates.append(normalized)
+    return _render_memory_preview(candidates)
 
 
 def dream_from_events(

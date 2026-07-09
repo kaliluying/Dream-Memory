@@ -4,7 +4,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .memory_agent import build_agent_candidates_from_payload, build_memory_extraction_prompt, extract_json_payload
+from .memory_agent import build_agent_candidates_from_payload, build_memory_extraction_prompt, extract_json_payload, _prompt_event_counts
 from .model_providers import invoke_model as invoke_model_provider
 from .model_providers import invoke_model_runtime
 
@@ -22,14 +22,19 @@ class MemoryExtractionState(TypedDict, total=False):
     runtime_config: dict[str, Any]
     model_runtime: dict[str, Any]
     trace_callback: Any
+    input_event_count: int
+    prompt_event_count: int
+    filtered_prompt_event_count: int
 
 
 def _build_prompt_node(state: MemoryExtractionState) -> dict[str, Any]:
+    events = list(state.get("events", []))
     return {
         "prompt": build_memory_extraction_prompt(
-            list(state.get("events", [])),
+            events,
             project=state.get("project"),
-        )
+        ),
+        **_prompt_event_counts(events),
     }
 
 

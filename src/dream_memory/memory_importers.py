@@ -248,9 +248,12 @@ def import_project_marker_events(project_roots: Iterable[Path | str]) -> list[No
             markers.append("frontend_project=package_json")
         lower_pyproject = pyproject_text.lower()
         lower_tests = test_text.lower()
-        if "pytest" in lower_pyproject or "import pytest" in lower_tests:
+        pyproject_configures_pytest = "pytest" in lower_pyproject
+        tests_use_pytest = pyproject_configures_pytest or "import pytest" in lower_tests or "from pytest" in lower_tests
+        tests_use_unittest = "import unittest" in lower_tests or "unittest.testcase" in lower_tests
+        if tests_use_pytest:
             markers.append("python_test_runner=pytest")
-        elif "import unittest" in lower_tests or "unittest.testcase" in lower_tests:
+        elif tests_use_unittest:
             markers.append("python_test_runner=unittest")
         if "fastapi" in lower_pyproject:
             markers.append("python_framework=fastapi")
@@ -548,4 +551,3 @@ class ClaudeCodeImporter:
                 ))
         events.extend(self._import_transcript_events())
         return events
-

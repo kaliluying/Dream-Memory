@@ -160,6 +160,11 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertIn("trace", cli_options)
             self.assertIn("summary", cli_options)
             self.assertIn("eval", cli_options)
+            self.assertIn("--output-dir", cli_options["init"])
+            self.assertIn("--timeout-seconds", cli_options["eval"])
+            self.assertIn("--max-attempts", cli_options["eval"])
+            self.assertIn("--fallback-rules-on-error", cli_options["eval"])
+            self.assertIn("--fallback-rules-on-empty", cli_options["eval"])
 
             payload = read_response.json()["config"]
             payload["mode"] = "rules"
@@ -201,6 +206,11 @@ class MemoryReviewWebTests(unittest.TestCase):
             payload["trace_candidate_id"] = "cand_123"
             payload["summary_output"] = "summary.md"
             payload["eval_input"] = "labeled.jsonl"
+            payload["eval_max_rows"] = 3
+            payload["eval_max_attempts"] = 1
+            payload["eval_continue_on_error"] = True
+            payload["eval_fallback_rules_on_error"] = True
+            payload["eval_fallback_rules_on_empty"] = True
 
             response = client.put("/api/memory/config", json={"config": payload})
 
@@ -218,6 +228,11 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(saved["trace_candidate_id"], "cand_123")
             self.assertEqual(saved["summary_output"], "summary.md")
             self.assertEqual(saved["eval_input"], "labeled.jsonl")
+            self.assertEqual(saved["eval_max_rows"], 3)
+            self.assertEqual(saved["eval_max_attempts"], 1)
+            self.assertTrue(saved["eval_continue_on_error"])
+            self.assertTrue(saved["eval_fallback_rules_on_error"])
+            self.assertTrue(saved["eval_fallback_rules_on_empty"])
             reloaded = client.get("/api/memory/config").json()["config"]
             self.assertEqual(reloaded["default_input"], "custom/events.jsonl")
             self.assertEqual(reloaded["default_project"], "D:/work/project")
@@ -231,6 +246,11 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(reloaded["trace_candidate_id"], "cand_123")
             self.assertEqual(reloaded["summary_output"], "summary.md")
             self.assertEqual(reloaded["eval_input"], "labeled.jsonl")
+            self.assertEqual(reloaded["eval_max_rows"], 3)
+            self.assertEqual(reloaded["eval_max_attempts"], 1)
+            self.assertTrue(reloaded["eval_continue_on_error"])
+            self.assertTrue(reloaded["eval_fallback_rules_on_error"])
+            self.assertTrue(reloaded["eval_fallback_rules_on_empty"])
 
     def test_memory_review_page_loads_start_defaults_from_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -674,6 +694,9 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertIn("applyAutoReview", response.text)
             self.assertIn("autoReviewForce", response.text)
             self.assertIn("suggested_actions", response.text)
+            self.assertIn("prompt_event_count", response.text)
+            self.assertIn("filtered_prompt_event_count", response.text)
+            self.assertIn("送模", response.text)
 
     def test_api_memory_run_review_summary_groups_queue_quality(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -186,6 +186,21 @@ class MemoryImporterTests(unittest.TestCase):
             self.assertIn("python_framework=fastapi", events[0].content)
             self.assertIn("tests/test_demo.py", events[0].metadata["python_test_paths"])
 
+    def test_import_project_marker_events_prefers_pytest_config_over_unittest_style_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nname='demo'\n\n[tool.pytest.ini_options]\ntestpaths=['tests']\n", encoding="utf-8")
+            (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "test_demo.py").write_text("import unittest\n\nclass DemoTests(unittest.TestCase):\n    pass\n", encoding="utf-8")
+
+            events = import_project_marker_events([root])
+
+            self.assertEqual(len(events), 1)
+            self.assertIn("python_test_runner=pytest", events[0].content)
+            self.assertNotIn("python_test_runner=unittest", events[0].content)
+
     def test_codex_import_reads_nested_rollout_response_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

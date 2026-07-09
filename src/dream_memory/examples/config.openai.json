@@ -1,0 +1,21 @@
+{
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "api_key_env": "OPENAI_API_KEY",
+  "base_url": null,
+  "timeout_seconds": 60,
+  "invoke_model": true,
+  "mode": "ai",
+  "output_dir": ".dream-memory",
+  "imports_output_dir": ".dream-memory/imports",
+  "memory_cards": ".dream-memory/memory_cards.jsonl",
+  "context_limit": 12,
+  "context_format": "json",
+  "auto_export": false,
+  "export_target": "both",
+  "export_scope": "project",
+  "export_output_dir": null,
+  "codex_home": "~/.codex",
+  "claude_home": "~/.claude",
+  "claude_state": "~/.claude.json"
+}

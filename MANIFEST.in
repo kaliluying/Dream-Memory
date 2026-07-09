@@ -1,0 +1,5 @@
+include README.md
+include pyproject.toml
+include docs/*.md
+include examples/*.json
+include examples/*.jsonl

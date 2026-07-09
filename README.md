@@ -26,6 +26,17 @@ uv run dream-memory init
 uv run dream-memory --help
 ```
 
+如需直接初始化一个自包含 memory 目录：
+
+```bash
+uv run dream-memory init --output-dir /tmp/dream-memory-workspace
+uv run dream-memory eval \
+  --input /tmp/dream-memory-workspace/examples/labeled-events.jsonl \
+  --output /tmp/dream-memory-workspace/eval.json
+```
+
+`--output-dir` 生成的配置会指向该目录内的 `imports/`、`memory_cards.jsonl` 和评估样例；设置好 `default_input` 后，`dream` / `run` / `pipeline` 可省略 `--input`，设置好 `extract_input` 后 `extract-facts` 可省略 `--input`。
+
 
 ## 轻量 Provider 配置
 
@@ -170,6 +181,8 @@ uv run dream-memory pipeline   --input .dream-memory/imports/all-events.jsonl   
 ## 可恢复 Run 工作流
 
 除了单次 `pipeline`，项目现在支持持久化 run：每次 run 会生成 `run_id`，状态写入 `.dream-memory/runs/{run_id}/state.json`，trace 写入 `trace.jsonl`，候选详情写入 `candidates/{candidate_id}.json`。
+
+AI run 会在输出、`state.json` 和 `trace.jsonl` 中记录 prompt 输入过滤统计：`input_event_count` 是原始事件数，`prompt_event_count` 是实际进入模型 prompt 的事件数，`filtered_prompt_event_count` 是被噪声过滤或超出 preview limit 的事件数，用于审计真实模型输入质量；eval 报告也会在每行 `extractions` 中透传这些字段。
 
 ```bash
 # 创建可恢复 run，执行到 waiting_review 后暂停
@@ -318,12 +331,48 @@ src/dream_memory/
 
 ## 评估抽取质量
 
+规则抽取 baseline：
+
 ```bash
-uv run dream-memory eval --input examples/labeled-events.jsonl --output .dream-memory/eval.json
+uv run dream-memory eval \
+  --input examples/labeled-events.jsonl \
+  --project . \
+  --mode rules \
+  --output .dream-memory/eval.rules.json
+```
+
+真实模型抽取对比：
+
+```bash
+uv run dream-memory eval \
+  --input examples/labeled-events.jsonl \
+  --project . \
+  --mode ai \
+  --timeout-seconds 20 \
+  --max-attempts 1 \
+  --continue-on-error \
+  --output .dream-memory/eval.ai.json
+```
+
+当前维护的 `examples/labeled-events.jsonl` 覆盖 13 行评估样本，包含用户偏好、项目事实、产品方向、人工审核门禁、失败教训、一次性任务噪声、内部上下文噪声、重复记忆、rejected option、凭据位置噪声、跨项目项目事实隔离，以及跨项目用户级偏好保留。自包含初始化会把示例评估项目设为 `/tmp/project`，因此 `dream-memory --config <dir>/config.json eval` 可直接复现基准结果。
+
+如果模型服务不稳定，可显式记录 AI 失败并回退到规则抽取，报告会同时输出 `extraction_success_count`、`extraction_error_count`、`fallback_count` 和 `fallback_empty_count`，避免把规则兜底误读成纯 AI 效果。AI 评估报告中的 `raw_candidate_count` 是单行模型原始候选数，`scored_candidate_count` 是单行经过 reject / 敏感证据过滤后真正计入 precision 的候选数；顶层 `raw_candidate_total` / `fallback_candidate_total` / `scored_candidate_total` 汇总全量原始候选、规则兜底候选和计分候选：
+
+```bash
+uv run dream-memory eval \
+  --input examples/labeled-events.jsonl \
+  --project . \
+  --mode ai \
+  --timeout-seconds 8 \
+  --max-attempts 1 \
+  --continue-on-error \
+  --fallback-rules-on-error \
+  --fallback-rules-on-empty \
+  --output .dream-memory/eval.ai-with-rules-fallback.json
 ```
 
 ## 测试
 
 ```bash
-uv run --with pytest pytest -v
+uv run pytest -v
 ```

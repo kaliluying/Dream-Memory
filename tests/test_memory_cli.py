@@ -1,7 +1,10 @@
+import io
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +29,33 @@ class MemoryCliTests(unittest.TestCase):
             payload = json.loads(out.read_text(encoding="utf-8"))
             self.assertTrue(payload["codex"]["history_found"])
             self.assertTrue(payload["claude"]["claude_md_found"])
+
+    def test_import_cli_uses_config_imports_output_dir_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex-home"
+            claude = root / "claude-home"
+            imports_dir = root / "configured-imports"
+            codex_sessions = codex / "sessions"
+            codex_sessions.mkdir(parents=True)
+            claude.mkdir()
+            (codex_sessions / "rollout.jsonl").write_text(json.dumps({
+                "timestamp": "2026-07-08T10:00:00Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "用户偏好中文回答。"}]},
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({
+                "codex_home": str(codex),
+                "claude_home": str(claude),
+                "claude_state": str(root / "claude.json"),
+                "imports_output_dir": str(imports_dir),
+            }, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "import", "all"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((imports_dir / "all-events.jsonl").exists())
 
     def test_import_codex_dry_run_writes_events(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -438,6 +468,55 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
 
+    def test_summary_and_export_treat_missing_memory_cards_as_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing_cards = root / "missing-memory_cards.jsonl"
+            export_dir = root / "exported"
+
+            self.assertEqual(main(["summary", "--memory-cards", str(missing_cards)]), 0)
+            self.assertEqual(main(["export", "--target", "codex", "--project", "/tmp/project", "--memory-cards", str(missing_cards), "--output-dir", str(export_dir)]), 0)
+            self.assertTrue((export_dir / "AGENTS.md").exists())
+
+    def test_context_cli_treats_missing_memory_cards_as_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing_cards_path = root / "missing-memory-cards.jsonl"
+
+            exit_code = main([
+                "context",
+                "--project", "/tmp/project",
+                "--memory-cards", str(missing_cards_path),
+                "--limit", "2",
+            ])
+
+            self.assertEqual(exit_code, 0)
+
+    def test_init_cli_accepts_output_dir_alias_for_workspace_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "custom-memory"
+
+            exit_code = main(["init", "--output-dir", str(workspace)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((workspace / "config.json").exists())
+            self.assertTrue((workspace / "memory_cards.jsonl").exists())
+            self.assertTrue((workspace / "examples" / "labeled-events.jsonl").exists())
+            self.assertFalse((root / "examples" / "labeled-events.jsonl").exists())
+            payload = json.loads((workspace / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["default_input"], str(workspace / "imports" / "all-events.jsonl"))
+            self.assertEqual(payload["init_config_output"], str(workspace / "config.json"))
+            self.assertEqual(payload["output_dir"], str(workspace))
+            self.assertEqual(payload["imports_output_dir"], str(workspace / "imports"))
+            self.assertEqual(payload["extract_input"], str(workspace / "imports" / "all-events.jsonl"))
+            self.assertEqual(payload["extract_output_dir"], str(workspace))
+            self.assertEqual(payload["review_candidates"], str(workspace / "ai-candidates.jsonl"))
+            self.assertEqual(payload["apply_reviewed"], str(workspace / "reviewed.jsonl"))
+            self.assertEqual(payload["eval_input"], str(workspace / "examples" / "labeled-events.jsonl"))
+            self.assertEqual(payload["eval_output"], str(workspace / "eval.json"))
+            self.assertEqual(payload["memory_cards"], str(workspace / "memory_cards.jsonl"))
+
     def test_review_cli_treats_missing_memory_cards_as_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -538,6 +617,223 @@ class MemoryCliTests(unittest.TestCase):
         self.assertFalse(dry_run_args.invoke_model)
         self.assertIsNone(pipeline_args.invoke_model)
 
+    def test_source_distribution_manifest_includes_maintained_docs_and_examples(self):
+        manifest = Path("MANIFEST.in").read_text(encoding="utf-8")
+
+        self.assertIn("include docs/*.md", manifest)
+        self.assertIn("include examples/*.json", manifest)
+        self.assertIn("include examples/*.jsonl", manifest)
+        self.assertNotIn("recursive-include docs", manifest)
+        self.assertNotIn("recursive-exclude .venv", manifest)
+        self.assertNotIn("prune docs/superpowers", manifest)
+
+    def test_eval_run_and_pipeline_missing_files_return_clean_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "missing.jsonl")
+
+            self.assertEqual(main(["eval", "--input", missing]), 2)
+            self.assertEqual(main(["run", "--input", missing]), 2)
+            self.assertEqual(main(["pipeline", "--input", missing]), 2)
+
+    def test_eval_run_and_pipeline_missing_files_have_no_tracebacks_in_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "missing.jsonl")
+            commands = [
+                (["uv", "run", "dream-memory", "eval", "--input", missing], "eval input not found"),
+                (["uv", "run", "dream-memory", "run", "--input", missing], "run input not found"),
+                (["uv", "run", "dream-memory", "pipeline", "--input", missing], "pipeline input not found"),
+            ]
+
+            for command, expected in commands:
+                result = subprocess.run(command, cwd=Path.cwd(), text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_eval_cli_missing_input_returns_clean_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "eval"])
+
+            self.assertEqual(exit_code, 2)
+
+    def test_eval_cli_uses_config_eval_mode_when_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labeled = root / "labeled.jsonl"
+            output = root / "configured-ai-eval.json"
+            config_path = root / "config.json"
+            labeled.write_text(json.dumps({
+                "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "eval_input": str(labeled),
+                "eval_project": "/tmp/project",
+                "eval_mode": "ai",
+                "eval_output": str(output),
+                "models": {"primary": {"provider": "openai", "model": "gpt-test", "api_key": "key"}},
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+            }, ensure_ascii=False), encoding="utf-8")
+
+            with patch("dream_memory.memory_cli.evaluate_labeled_events", return_value={
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "extraction_success_count": 0,
+                "extraction_error_count": 0,
+                "fallback_count": 0,
+            }) as evaluate:
+                exit_code = main(["--config", str(config_path), "eval"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(evaluate.call_args.kwargs["mode"], "ai")
+
+    def test_eval_cli_uses_config_defaults_when_args_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labeled = root / "labeled.jsonl"
+            output = root / "configured-eval.json"
+            config_path = root / "config.json"
+            labeled.write_text(json.dumps({
+                "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "eval_input": str(labeled),
+                "eval_project": "/tmp/project",
+                "eval_mode": "rules",
+                "eval_output": str(output),
+                "eval_max_rows": 1,
+                "eval_continue_on_error": True,
+                "eval_fallback_rules_on_error": True,
+                "eval_fallback_rules_on_empty": True,
+            }, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "eval"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["rows"], 1)
+            self.assertEqual(payload["precision"], 1.0)
+
+    def test_eval_cli_config_default_empty_fallback_is_forwarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labeled = root / "labeled.jsonl"
+            config_path = root / "config.json"
+            labeled.write_text(json.dumps({
+                "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "eval_input": str(labeled),
+                "eval_mode": "ai",
+                "eval_fallback_rules_on_empty": True,
+                "models": {"primary": {"provider": "openai", "model": "gpt-test", "api_key": "key"}},
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+            }, ensure_ascii=False), encoding="utf-8")
+
+            with patch("dream_memory.memory_cli.evaluate_labeled_events", return_value={
+                "precision": 1.0, "recall": 1.0, "f1": 1.0,
+                "extraction_success_count": 0, "extraction_error_count": 0,
+                "fallback_count": 1, "fallback_empty_count": 1,
+            }) as evaluate:
+                exit_code = main(["--config", str(config_path), "eval"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(evaluate.call_args.kwargs["fallback_rules_on_empty"])
+
+    def test_eval_cli_passes_model_runtime_and_resilience_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labeled = root / "labeled.jsonl"
+            output = root / "eval.json"
+            config_path = root / "config.json"
+            labeled.write_text(json.dumps({
+                "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "models": {
+                    "primary": {"provider": "openai", "model": "gpt-test", "api_key": "key", "timeout_seconds": 60}
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"], "retry": {"max_attempts": 3}},
+            }, ensure_ascii=False), encoding="utf-8")
+
+            with patch("dream_memory.memory_cli.evaluate_labeled_events", return_value={
+                "precision": 1.0,
+                "recall": 1.0,
+                "f1": 1.0,
+                "extraction_success_count": 0,
+                "extraction_error_count": 1,
+                "fallback_count": 1,
+            }) as evaluate:
+                exit_code = main([
+                    "--config", str(config_path),
+                    "eval",
+                    "--input", str(labeled),
+                    "--project", "/tmp/project",
+                    "--mode", "ai",
+                    "--provider", "openai",
+                    "--model", "gpt-override",
+                    "--timeout-seconds", "7",
+                    "--max-attempts", "1",
+                    "--max-rows", "2",
+                    "--continue-on-error",
+                    "--fallback-rules-on-error",
+                    "--fallback-rules-on-empty",
+                    "--output", str(output),
+                ])
+
+            self.assertEqual(exit_code, 0)
+            kwargs = evaluate.call_args.kwargs
+            self.assertEqual(kwargs["project"], "/tmp/project")
+            self.assertEqual(kwargs["mode"], "ai")
+            self.assertEqual(kwargs["model"], "openai:gpt-override")
+            self.assertEqual(kwargs["runtime_config"]["models"]["override"]["timeout_seconds"], 7)
+            self.assertEqual(kwargs["runtime_config"]["model_policy"]["retry"]["max_attempts"], 1)
+            self.assertEqual(kwargs["max_rows"], 2)
+            self.assertTrue(kwargs["continue_on_error"])
+            self.assertTrue(kwargs["fallback_rules_on_error"])
+            self.assertTrue(kwargs["fallback_rules_on_empty"])
+            self.assertTrue(output.exists())
+
+
+    def test_eval_cli_output_summary_includes_candidate_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labeled = root / "labeled.jsonl"
+            output = root / "eval.json"
+            labeled.write_text(json.dumps({
+                "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with patch("dream_memory.memory_cli.evaluate_labeled_events", return_value={
+                "precision": 1.0,
+                "recall": 1.0,
+                "f1": 1.0,
+                "raw_candidate_total": 2,
+                "fallback_candidate_total": 1,
+                "scored_candidate_total": 1,
+                "extraction_success_count": 1,
+                "extraction_error_count": 0,
+                "fallback_count": 1,
+                "fallback_empty_count": 1,
+            }):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    exit_code = main(["eval", "--input", str(labeled), "--output", str(output)])
+
+        self.assertEqual(exit_code, 0)
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(summary["raw_candidate_total"], 2)
+        self.assertEqual(summary["fallback_candidate_total"], 1)
+        self.assertEqual(summary["scored_candidate_total"], 1)
+
     def test_init_config_cli_writes_default_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
@@ -549,6 +845,125 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(payload["models"]["primary"]["provider"], "anthropic")
             self.assertEqual(payload["models"]["primary"]["model"], "claude-sonnet-4-6")
             self.assertEqual(payload["model_policy"]["fallback_chain"], ["primary"])
+
+    def test_run_and_pipeline_missing_input_return_clean_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"default_input": None}, ensure_ascii=False), encoding="utf-8")
+
+            self.assertEqual(main(["--config", str(config_path), "run"]), 2)
+            self.assertEqual(main(["--config", str(config_path), "pipeline"]), 2)
+
+    def test_run_cli_uses_config_default_input_and_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events.write_text(json.dumps({
+                "event_id": "event_1",
+                "source": "codex",
+                "role": "user",
+                "event_type": "history_prompt",
+                "project": "/tmp/project",
+                "content": "正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。",
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "default_input": str(events),
+                "default_project": "/tmp/project",
+                "output_dir": str(memory_dir),
+                "invoke_model": False,
+                "mode": "rules",
+            }, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "run", "--mode", "rules"])
+
+            self.assertEqual(exit_code, 0)
+            state = json.loads(next((memory_dir / "runs").glob("*/state.json")).read_text(encoding="utf-8"))
+            self.assertEqual(state["input_path"], str(events))
+            self.assertEqual(state["project"], "/tmp/project")
+            self.assertTrue(Path(state["artifacts"]["review_queue_path"]).exists())
+
+    def test_pipeline_cli_uses_config_default_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            memory_dir = root / "memory"
+            config_path = root / "config.json"
+            events.write_text(json.dumps({
+                "event_id": "event_1",
+                "source": "codex",
+                "role": "user",
+                "event_type": "history_prompt",
+                "project": "/tmp/project",
+                "content": "正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。",
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "default_input": str(events),
+                "default_project": "/tmp/project",
+                "output_dir": str(memory_dir),
+                "invoke_model": False,
+                "mode": "rules",
+            }, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = main(["--config", str(config_path), "pipeline", "--mode", "rules"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((memory_dir / "review_queue.jsonl").exists())
+
+    def test_dream_and_extract_facts_missing_files_have_no_tracebacks_in_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "missing.jsonl")
+            commands = [
+                (["uv", "run", "dream-memory", "dream", "--input", missing], "dream input not found"),
+                (["uv", "run", "dream-memory", "extract-facts", "--input", missing], "extract-facts input not found"),
+            ]
+
+            for command, expected in commands:
+                result = subprocess.run(command, cwd=Path.cwd(), text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_dream_and_extract_facts_use_config_default_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            dream_dir = root / "dream-memory"
+            extract_dir = root / "facts-memory"
+            config_path = root / "config.json"
+            events.write_text(json.dumps({
+                "event_id": "event_1",
+                "source": "codex",
+                "role": "user",
+                "event_type": "history_prompt",
+                "project": "/tmp/project",
+                "content": "正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。",
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            config_path.write_text(json.dumps({
+                "default_input": str(events),
+                "default_project": "/tmp/project",
+                "extract_input": str(events),
+                "extract_project": "/tmp/project",
+                "extract_output_dir": str(extract_dir),
+                "output_dir": str(dream_dir),
+                "invoke_model": False,
+                "mode": "rules",
+            }, ensure_ascii=False), encoding="utf-8")
+
+            self.assertEqual(main(["--config", str(config_path), "dream", "--mode", "rules"]), 0)
+            self.assertEqual(main(["--config", str(config_path), "extract-facts"]), 0)
+
+            self.assertTrue((dream_dir / "candidates.jsonl").exists())
+            self.assertTrue((extract_dir / "facts.jsonl").exists())
+
+    def test_dream_and_extract_facts_missing_inputs_return_clean_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"default_input": None, "extract_input": None}, ensure_ascii=False), encoding="utf-8")
+
+            self.assertEqual(main(["--config", str(config_path), "dream"]), 2)
+            self.assertEqual(main(["--config", str(config_path), "extract-facts"]), 2)
 
     def test_dream_uses_config_for_output_model_and_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -681,6 +1096,73 @@ class MemoryCliTests(unittest.TestCase):
             self.assertTrue((root / ".dream-memory" / "imports").is_dir())
             self.assertTrue((root / ".dream-memory" / "runs").is_dir())
             self.assertTrue((root / "examples" / "sample-events.jsonl").exists())
+            self.assertTrue((root / "examples" / "labeled-events.jsonl").exists())
+
+
+
+
+    def test_packaged_workspace_examples_match_repository_samples(self):
+        from importlib import resources
+
+        root = Path(__file__).resolve().parents[1] / "examples"
+        for name in ["sample-events.jsonl", "reviewed.example.jsonl", "config.openai.json", "config.anthropic.json"]:
+            packaged = resources.files("dream_memory") / "examples" / name
+            self.assertEqual(packaged.read_text(encoding="utf-8"), (root / name).read_text(encoding="utf-8"))
+
+    def test_packaged_labeled_eval_resource_matches_repository_sample(self):
+        from importlib import resources
+
+        repository_sample = Path(__file__).resolve().parents[1] / "examples" / "labeled-events.jsonl"
+        packaged_sample = resources.files("dream_memory") / "examples" / "labeled-events.jsonl"
+
+        self.assertEqual(packaged_sample.read_text(encoding="utf-8"), repository_sample.read_text(encoding="utf-8"))
+
+    def test_init_cli_labeled_eval_example_matches_repository_sample_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+
+            exit_code = main(["init", "--output-dir", str(root)])
+
+            self.assertEqual(exit_code, 0)
+            generated = root / "examples" / "labeled-events.jsonl"
+            repository_sample = Path(__file__).resolve().parents[1] / "examples" / "labeled-events.jsonl"
+            generated_rows = [line for line in generated.read_text(encoding="utf-8").splitlines() if line.strip()]
+            repository_rows = [line for line in repository_sample.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(len(generated_rows), len(repository_rows))
+            self.assertGreaterEqual(len(generated_rows), 13)
+            self.assertIn("credential_location_noise", generated.read_text(encoding="utf-8"))
+            self.assertIn("cross_project_noise", generated.read_text(encoding="utf-8"))
+            self.assertIn("cross_project_user_preference", generated.read_text(encoding="utf-8"))
+
+
+    def test_init_output_dir_configured_eval_example_runs_without_extra_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+
+            exit_code = main(["init", "--output-dir", str(root)])
+            self.assertEqual(exit_code, 0)
+
+            exit_code = main(["--config", str(root / "config.json"), "eval"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads((root / "eval.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["rows"], 13)
+            self.assertEqual(payload["precision"], 1.0)
+            self.assertEqual(payload["recall"], 1.0)
+            self.assertEqual(payload["f1"], 1.0)
+
+    def test_init_cli_labeled_eval_example_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            main(["init", "--path", str(root)])
+            output = root / "eval.json"
+
+            exit_code = main(["eval", "--input", str(root / "examples" / "labeled-events.jsonl"), "--project", "/tmp/project", "--output", str(output)])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["precision"], 1.0)
+            self.assertEqual(payload["recall"], 1.0)
 
     def test_check_provider_detects_inline_secret_misconfiguration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -758,6 +1240,34 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             invoke.assert_not_called()
             self.assertTrue((output_dir / "ai-prompt.md").exists())
+
+
+    def test_run_cli_records_prompt_filter_counts_in_payload_state_and_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = root / "events.jsonl"
+            memory_dir = root / "memory"
+            events.write_text("".join([
+                json.dumps({"event_id": "state", "source": "claude_code", "role": "system", "event_type": "project_state", "project": str(root), "content": "Claude Code project state for /tmp/project"}, ensure_ascii=False) + "\n",
+                json.dumps({"event_id": "durable", "source": "codex", "role": "user", "event_type": "history_prompt", "project": str(root), "content": "正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。"}, ensure_ascii=False) + "\n",
+            ]), encoding="utf-8")
+
+            with patch("sys.stdout", new_callable=lambda: __import__('io').StringIO()) as stdout:
+                exit_code = main(["run", "--input", str(events), "--project", str(root), "--output-dir", str(memory_dir), "--mode", "ai", "--dry-run"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["input_event_count"], 2)
+            self.assertEqual(payload["prompt_event_count"], 1)
+            self.assertEqual(payload["filtered_prompt_event_count"], 1)
+            state = json.loads(Path(payload["state_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(state["counts"]["input_event_count"], 2)
+            self.assertEqual(state["counts"]["prompt_event_count"], 1)
+            self.assertEqual(state["counts"]["filtered_prompt_event_count"], 1)
+            trace = [json.loads(line) for line in (Path(payload["run_dir"]) / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            extraction_events = [event for event in trace if event.get("event_type") == "ai_extraction_complete"]
+            self.assertEqual(extraction_events[-1]["payload"]["prompt_event_count"], 1)
+            self.assertEqual(extraction_events[-1]["payload"]["filtered_prompt_event_count"], 1)
 
     def test_run_cli_records_model_runtime_trace_events(self):
         with tempfile.TemporaryDirectory() as tmp:

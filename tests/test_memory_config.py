@@ -7,6 +7,15 @@ from dream_memory.memory_config import DEFAULT_MEMORY_CONFIG, load_memory_config
 
 
 class MemoryConfigTests(unittest.TestCase):
+    def test_default_config_contains_eval_resilience_defaults(self):
+        config = load_memory_config(None)
+
+        self.assertIsNone(config["eval_max_rows"])
+        self.assertIsNone(config["eval_max_attempts"])
+        self.assertFalse(config["eval_continue_on_error"])
+        self.assertFalse(config["eval_fallback_rules_on_error"])
+        self.assertFalse(config["eval_fallback_rules_on_empty"])
+
     def test_load_memory_config_uses_defaults_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = load_memory_config(Path(tmp) / "missing.json")
