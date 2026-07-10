@@ -1215,7 +1215,7 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertIn("不要把未经审核的候选自动写入", candidates[0]["content"])
         self.assertIn("explicit", candidates[0]["tags"])
 
-    def test_extract_atomic_facts_promotes_project_package_manager_instructions(self):
+    def test_project_instruction_single_event_is_reviewable(self):
         events = [{
             "event_id": "event_agents",
             "source": "codex",
@@ -1228,11 +1228,37 @@ class MemoryDreamingTests(unittest.TestCase):
 
         facts = extract_atomic_facts(events, project="/tmp/project")
         candidates = build_candidates_from_facts(facts)
+        queue = build_review_queue(candidates, [])
         contents = "\n".join(candidate["content"] for candidate in candidates)
 
         self.assertIn("Python 后端使用 uv", contents)
         self.assertIn("前端使用 pnpm", contents)
         self.assertTrue(any(candidate["type"] == "workflow" for candidate in candidates))
+        self.assertIn("explicit", candidates[0]["tags"])
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["dream_analysis"]["required_evidence_count"], 1)
+
+    def test_project_markers_single_event_are_reviewable(self):
+        events = [{
+            "event_id": "event_project_markers",
+            "source": "project",
+            "role": "system",
+            "event_type": "project_markers",
+            "project": "/tmp/project",
+            "content": "python_package_manager=uv; python_test_runner=pytest; python_framework=fastapi",
+        }]
+
+        facts = extract_atomic_facts(events, project="/tmp/project")
+        candidates = build_candidates_from_facts(facts)
+        queue = build_review_queue(candidates, [])
+
+        self.assertEqual(len(facts), 3)
+        self.assertTrue(all("explicit" in fact["tags"] for fact in facts))
+        self.assertEqual(len(queue), 3)
+        self.assertTrue(all(
+            item["dream_analysis"]["required_evidence_count"] == 1
+            for item in queue
+        ))
 
     def test_extract_atomic_facts_promotes_memory_product_direction_and_review_gate(self):
         events = [

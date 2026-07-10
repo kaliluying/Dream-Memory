@@ -843,7 +843,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 project=str(event_project) if event_project else None,
                 source_event=event,
                 confidence=0.92,
-                tags=["package-manager", "uv", "pnpm", "python", "frontend"],
+                tags=["package-manager", "uv", "pnpm", "python", "frontend", "explicit"],
             ))
             continue
 
@@ -856,7 +856,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
             has_django = "python_framework=django" in lowered
             if has_uv or has_pnpm:
                 statement_parts = []
-                tags = ["package-manager"]
+                tags = ["package-manager", "explicit"]
                 if has_uv:
                     statement_parts.append("Python 项目使用 uv 进行包管理和命令执行")
                     tags.extend(["uv", "python"])
@@ -881,7 +881,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                     project=str(event_project) if event_project else None,
                     source_event=event,
                     confidence=0.82,
-                    tags=["testing", "python", runner],
+                    tags=["testing", "python", runner, "explicit"],
                 ))
             if has_fastapi or has_django:
                 framework = "FastAPI" if has_fastapi else "Django"
@@ -892,7 +892,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                     project=str(event_project) if event_project else None,
                     source_event=event,
                     confidence=0.78,
-                    tags=["framework", "python", framework.lower()],
+                    tags=["framework", "python", framework.lower(), "explicit"],
                 ))
             continue
 
