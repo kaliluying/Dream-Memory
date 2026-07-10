@@ -5,10 +5,139 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dream_memory.memory_cli import main
-from dream_memory.memory_eval import evaluate_labeled_events
+from dream_memory.memory_eval import _candidate_outcome, evaluate_labeled_events
 
 
 class MemoryEvalTests(unittest.TestCase):
+    def test_candidate_outcome_normalizes_dream_actions(self):
+        self.assertEqual(
+            _candidate_outcome({"dream_analysis": {"suggested_action": "create"}}),
+            "reviewable",
+        )
+        self.assertEqual(
+            _candidate_outcome({"dream_analysis": {"suggested_action": "merge"}}),
+            "reviewable",
+        )
+        self.assertEqual(
+            _candidate_outcome({
+                "dream_analysis": {"suggested_action": "needs_more_evidence"},
+            }),
+            "deferred",
+        )
+        self.assertEqual(
+            _candidate_outcome({"dream_analysis": {"suggested_action": "reject"}}),
+            "rejected",
+        )
+
+    def test_eval_reports_expected_outcome_accuracy(self):
+        deferred = {
+            "id": "mem_deferred",
+            "content": "User prefers Vim.",
+            "type": "preference",
+            "scope": "user",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [{"event_id": "event_1"}],
+        }
+        reviewable = {
+            "id": "mem_reviewable",
+            "content": "User prefers concise answers.",
+            "type": "preference",
+            "scope": "user",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
+        }
+        rows = [
+            {
+                "id": "deferred",
+                "events": [],
+                "expected": [],
+                "expected_outcomes": ["deferred"],
+            },
+            {
+                "id": "reviewable",
+                "events": [],
+                "expected": [{
+                    "content": "User prefers concise answers.",
+                    "type": "preference",
+                    "scope": "user",
+                }],
+                "expected_outcomes": ["reviewable"],
+            },
+            {
+                "id": "none",
+                "events": [],
+                "expected": [],
+                "expected_outcomes": ["none"],
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            path.write_text(
+                "".join(
+                    json.dumps(row, ensure_ascii=False) + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+            with patch("dream_memory.memory_eval._extract_candidates") as extract:
+                extract.side_effect = [
+                    ([deferred], None),
+                    ([reviewable], None),
+                    ([], None),
+                ]
+                result = evaluate_labeled_events(
+                    path,
+                    project=None,
+                    mode="rules",
+                )
+
+        self.assertEqual(result["outcome_checked_rows"], 3)
+        self.assertEqual(result["outcome_correct_rows"], 3)
+        self.assertEqual(result["outcome_accuracy"], 1.0)
+        self.assertEqual(result["outcome_mismatches"], [])
+
+    def test_eval_rejects_invalid_expected_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            path.write_text(json.dumps({
+                "id": "invalid",
+                "events": [],
+                "expected": [],
+                "expected_outcomes": ["later"],
+            }) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsupported expected outcome",
+            ):
+                evaluate_labeled_events(path, project=None, mode="rules")
+
+    def test_eval_keeps_legacy_rows_without_outcome_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            path.write_text(json.dumps({
+                "id": "legacy",
+                "events": [],
+                "expected": [],
+            }) + "\n", encoding="utf-8")
+
+            with patch(
+                "dream_memory.memory_eval._extract_candidates",
+                return_value=([], None),
+            ):
+                result = evaluate_labeled_events(
+                    path,
+                    project=None,
+                    mode="rules",
+                )
+
+        self.assertEqual(result["outcome_checked_rows"], 0)
+        self.assertEqual(result["outcome_correct_rows"], 0)
+        self.assertEqual(result["outcome_accuracy"], 0.0)
+
     def test_evaluate_labeled_events_reports_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "labeled.jsonl"

@@ -13,6 +13,8 @@ from .memory_dreaming import (
     normalize_memory_text,
 )
 
+_EXPECTED_OUTCOMES = {"reviewable", "deferred", "rejected", "none"}
+
 
 def _row_events(row: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(row.get("events"), list):
@@ -29,6 +31,21 @@ def _row_expected(row: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(expected, list):
         return [item for item in expected if isinstance(item, dict)]
     return []
+
+
+def _row_expected_outcomes(row: dict[str, Any]) -> list[str] | None:
+    if "expected_outcomes" not in row:
+        return None
+    raw = row.get("expected_outcomes")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("expected_outcomes must be a non-empty list")
+    outcomes = sorted({str(item).strip() for item in raw if str(item).strip()})
+    if not outcomes:
+        raise ValueError("expected_outcomes must contain at least one outcome")
+    invalid = sorted(set(outcomes) - _EXPECTED_OUTCOMES)
+    if invalid:
+        raise ValueError(f"unsupported expected outcome: {invalid[0]}")
+    return outcomes
 
 
 def _row_label(row: dict[str, Any], row_index: int) -> str:
@@ -59,25 +76,47 @@ def _matches_expected(candidate: dict[str, Any], expected: dict[str, Any]) -> bo
     return bool(type_match and scope_match and text_match)
 
 
-def _scored_candidates(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _candidate_outcome(candidate: dict[str, Any]) -> str:
+    analysis = (
+        candidate.get("dream_analysis")
+        if isinstance(candidate.get("dream_analysis"), dict)
+        else {}
+    )
+    action = str(analysis.get("suggested_action") or "")
+    if action in {"create", "review", "merge"}:
+        return "reviewable"
+    if action == "needs_more_evidence":
+        return "deferred"
+    if action == "reject":
+        return "rejected"
+    raise ValueError(f"unsupported dream action: {action}")
+
+
+def _scored_candidates(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, list[str]]:
     normalized = []
     for index, candidate in enumerate(candidates, start=1):
         item = dict(candidate)
         item.setdefault("id", f"eval_candidate_{index}")
         normalized.append(item)
     analyzed = apply_dream_analysis_to_candidates(normalized, [])
-    deferred = len([
+    outcomes = (
+        sorted({_candidate_outcome(candidate) for candidate in analyzed})
+        if analyzed
+        else ["none"]
+    )
+    deferred = sum(
+        1
+        for candidate in analyzed
+        if _candidate_outcome(candidate) == "deferred"
+    )
+    reviewable = [
         candidate
         for candidate in analyzed
-        if str((candidate.get("dream_analysis") or {}).get("suggested_action") or "")
-        == "needs_more_evidence"
-    ])
-    return [
-        candidate
-        for candidate in analyzed
-        if str((candidate.get("dream_analysis") or {}).get("suggested_action") or "")
-        in {"create", "review", "merge"}
-    ], deferred
+        if _candidate_outcome(candidate) == "reviewable"
+    ]
+    return reviewable, deferred, outcomes
 
 
 def _extract_candidates(
@@ -144,11 +183,16 @@ def evaluate_labeled_events(
     scored_candidate_total = 0
     fallback_candidate_total = 0
     deferred_candidate_total = 0
+    outcome_checked_rows = 0
+    outcome_correct_rows = 0
+    outcome_mismatches: list[dict[str, Any]] = []
 
     for row_index, row in enumerate(rows, start=1):
         row_label = _row_label(row, row_index)
         events = _row_events(row)
         expected = _row_expected(row)
+        expected_outcomes = _row_expected_outcomes(row)
+        actual_outcomes = ["none"]
         expected_total += len(expected)
         raw_candidate_count = 0
         fallback_candidate_count = 0
@@ -173,7 +217,7 @@ def evaluate_labeled_events(
             })
             if fallback_rules_on_error:
                 candidates, _ = _extract_candidates(events, project=project, mode="rules")
-                candidates, deferred_count = _scored_candidates(candidates)
+                candidates, deferred_count, actual_outcomes = _scored_candidates(candidates)
                 deferred_candidate_total += deferred_count
                 fallback_candidate_count = len(candidates)
                 fallback_candidate_total += fallback_candidate_count
@@ -185,16 +229,19 @@ def evaluate_labeled_events(
         else:
             raw_candidate_count = len(candidates)
             raw_candidate_total += raw_candidate_count
-            candidates, deferred_count = _scored_candidates(candidates)
+            candidates, deferred_count, actual_outcomes = _scored_candidates(candidates)
             deferred_candidate_total += deferred_count
         if mode == "ai" and fallback_rules_on_empty and not candidates:
             fallback_candidates, _ = _extract_candidates(events, project=project, mode="rules")
-            fallback_candidates, deferred_count = _scored_candidates(fallback_candidates)
+            fallback_candidates, deferred_count, fallback_outcomes = _scored_candidates(
+                fallback_candidates,
+            )
             deferred_candidate_total += deferred_count
             if fallback_candidates:
                 fallback_candidate_count = len(fallback_candidates)
                 fallback_candidate_total += fallback_candidate_count
                 candidates = fallback_candidates
+                actual_outcomes = fallback_outcomes
                 extraction_meta = {"fallback": "rules_empty_ai", "candidate_count": len(candidates)}
                 fallback_count += 1
                 fallback_empty_count += 1
@@ -223,6 +270,17 @@ def evaluate_labeled_events(
         for idx, candidate in enumerate(candidates):
             if idx not in matched_candidates:
                 false_positives.append({"row": row_index, "row_id": row_label, "candidate": candidate})
+        if expected_outcomes is not None:
+            outcome_checked_rows += 1
+            if actual_outcomes == expected_outcomes:
+                outcome_correct_rows += 1
+            else:
+                outcome_mismatches.append({
+                    "row": row_index,
+                    "row_id": row_label,
+                    "expected_outcomes": expected_outcomes,
+                    "actual_outcomes": actual_outcomes,
+                })
 
     precision = true_positive / predicted_total if predicted_total else 0.0
     recall = true_positive / expected_total if expected_total else 0.0
@@ -236,6 +294,13 @@ def evaluate_labeled_events(
         "fallback_candidate_total": fallback_candidate_total,
         "scored_candidate_total": scored_candidate_total,
         "deferred_candidate_count": deferred_candidate_total,
+        "outcome_checked_rows": outcome_checked_rows,
+        "outcome_correct_rows": outcome_correct_rows,
+        "outcome_accuracy": round(
+            outcome_correct_rows / outcome_checked_rows,
+            3,
+        ) if outcome_checked_rows else 0.0,
+        "outcome_mismatches": outcome_mismatches[:20],
         "true_positive": true_positive,
         "false_positive_count": len(false_positives),
         "false_negative_count": len(false_negatives),
