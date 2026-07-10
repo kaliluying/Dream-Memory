@@ -14,3 +14,4 @@ CLAUDE.md
 
 .tmp_*.log
 .tmp_*.png
+.worktrees/
