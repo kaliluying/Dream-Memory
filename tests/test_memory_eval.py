@@ -138,6 +138,29 @@ class MemoryEvalTests(unittest.TestCase):
         self.assertEqual(result["outcome_correct_rows"], 0)
         self.assertEqual(result["outcome_accuracy"], 0.0)
 
+    def test_repository_labeled_rules_eval_has_perfect_outcome_accuracy(self):
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "examples"
+            / "labeled-events.jsonl"
+        )
+
+        result = evaluate_labeled_events(
+            path,
+            project="/tmp/project",
+            mode="rules",
+        )
+
+        self.assertEqual(result["rows"], 16)
+        self.assertEqual(result["precision"], 1.0)
+        self.assertEqual(result["true_positive"], 12)
+        self.assertEqual(result["false_positive_count"], 0)
+        self.assertEqual(result["false_negative_count"], 0)
+        self.assertEqual(result["deferred_candidate_count"], 2)
+        self.assertEqual(result["outcome_checked_rows"], 16)
+        self.assertEqual(result["outcome_accuracy"], 1.0)
+        self.assertEqual(result["outcome_mismatches"], [])
+
     def test_evaluate_labeled_events_reports_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "labeled.jsonl"

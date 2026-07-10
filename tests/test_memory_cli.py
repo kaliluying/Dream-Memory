@@ -1147,9 +1147,13 @@ class MemoryCliTests(unittest.TestCase):
             payload = json.loads((root / "eval.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["rows"], 16)
             self.assertEqual(payload["precision"], 1.0)
-            self.assertEqual(payload["true_positive"], 8)
+            self.assertEqual(payload["recall"], 1.0)
+            self.assertEqual(payload["f1"], 1.0)
+            self.assertEqual(payload["true_positive"], 12)
             self.assertEqual(payload["false_positive_count"], 0)
-            self.assertEqual(payload["deferred_candidate_count"], 6)
+            self.assertEqual(payload["deferred_candidate_count"], 2)
+            self.assertEqual(payload["outcome_checked_rows"], 16)
+            self.assertEqual(payload["outcome_accuracy"], 1.0)
 
     def test_init_cli_labeled_eval_example_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1161,10 +1165,15 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["rows"], 16)
             self.assertEqual(payload["precision"], 1.0)
-            self.assertEqual(payload["true_positive"], 8)
+            self.assertEqual(payload["recall"], 1.0)
+            self.assertEqual(payload["f1"], 1.0)
+            self.assertEqual(payload["true_positive"], 12)
             self.assertEqual(payload["false_positive_count"], 0)
-            self.assertEqual(payload["deferred_candidate_count"], 6)
+            self.assertEqual(payload["deferred_candidate_count"], 2)
+            self.assertEqual(payload["outcome_checked_rows"], 16)
+            self.assertEqual(payload["outcome_accuracy"], 1.0)
 
     def test_check_provider_detects_inline_secret_misconfiguration(self):
         with tempfile.TemporaryDirectory() as tmp:
