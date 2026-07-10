@@ -228,7 +228,7 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "review_queue.jsonl").exists())
 
-    def test_auto_review_cli_writes_reviewed_decisions_for_run_queue(self):
+    def test_auto_review_cli_never_approves_create_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             memory_dir = root / "memory"
@@ -249,12 +249,12 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             reviewed_path = run_dir / "reviewed.jsonl"
             rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual([row["action"] for row in rows], ["approved", "rejected"])
+            self.assertEqual([row["action"] for row in rows], ["rejected"])
             updated = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(updated["counts"]["auto_review_count"], 2)
+            self.assertEqual(updated["counts"]["auto_review_count"], 1)
             self.assertIn("auto_reviewed", (run_dir / "trace.jsonl").read_text(encoding="utf-8"))
 
-    def test_auto_review_cli_skips_merges_by_default(self):
+    def test_auto_review_cli_never_approves_merge_even_when_included(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             memory_dir = root / "memory"
@@ -281,8 +281,7 @@ class MemoryCliTests(unittest.TestCase):
             exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--include-merges", "--force"])
 
             self.assertEqual(exit_code, 0)
-            rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(rows[0]["action"], "merged")
+            self.assertEqual(reviewed_path.read_text(encoding="utf-8"), "")
 
     def test_auto_review_cli_skips_duplicates_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -338,7 +337,8 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["dry_run"])
-            self.assertEqual(payload["decision_count"], 1)
+            self.assertEqual(payload["decision_count"], 0)
+            self.assertEqual(payload["skip_reasons"], {"requires_manual_review": 1})
             rows = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(rows[0]["candidate_id"], "manual")
 
@@ -361,11 +361,12 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["dry_run"])
-            self.assertEqual(payload["decision_count"], 1)
+            self.assertEqual(payload["decision_count"], 0)
+            self.assertEqual(payload["skip_reasons"], {"requires_manual_review": 1})
             self.assertFalse((run_dir / "reviewed.jsonl").exists())
             self.assertEqual((run_dir / "state.json").read_text(encoding="utf-8"), before_state)
 
-    def test_auto_review_cli_reports_skip_reasons_for_review_and_low_score(self):
+    def test_auto_review_cli_reports_manual_skip_reason_regardless_of_score(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path = root / "config.json"
@@ -386,8 +387,7 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["skipped"], 2)
-            self.assertEqual(payload["skip_reasons"]["below_min_score"], 1)
-            self.assertEqual(payload["skip_reasons"]["requires_manual_review"], 1)
+            self.assertEqual(payload["skip_reasons"], {"requires_manual_review": 2})
 
     def test_auto_review_cli_refuses_to_overwrite_existing_reviewed_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -412,8 +412,7 @@ class MemoryCliTests(unittest.TestCase):
             exit_code = main(["--config", str(config_path), "auto-review", "--run-id", state["run_id"], "--force"])
 
             self.assertEqual(exit_code, 0)
-            overwritten = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(overwritten[0]["candidate_id"], "cand_1")
+            self.assertEqual(reviewed_path.read_text(encoding="utf-8"), "")
 
     def test_apply_cli_writes_memory_cards_and_memory_md(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1146,10 +1145,11 @@ class MemoryCliTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             payload = json.loads((root / "eval.json").read_text(encoding="utf-8"))
-            self.assertEqual(payload["rows"], 13)
+            self.assertEqual(payload["rows"], 16)
             self.assertEqual(payload["precision"], 1.0)
-            self.assertEqual(payload["recall"], 1.0)
-            self.assertEqual(payload["f1"], 1.0)
+            self.assertEqual(payload["true_positive"], 8)
+            self.assertEqual(payload["false_positive_count"], 0)
+            self.assertEqual(payload["deferred_candidate_count"], 6)
 
     def test_init_cli_labeled_eval_example_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1162,7 +1162,9 @@ class MemoryCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["precision"], 1.0)
-            self.assertEqual(payload["recall"], 1.0)
+            self.assertEqual(payload["true_positive"], 8)
+            self.assertEqual(payload["false_positive_count"], 0)
+            self.assertEqual(payload["deferred_candidate_count"], 6)
 
     def test_check_provider_detects_inline_secret_misconfiguration(self):
         with tempfile.TemporaryDirectory() as tmp:

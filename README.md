@@ -12,11 +12,15 @@ AI 抽取路径现在由 `memory_agent.py` 直接执行：`build prompt -> invok
 - 保留规则模式作为 fallback/debug：`--mode rules`
 - 对候选记忆做安全过滤、schema 校验、证据校验和去重
 - 通过 review queue 进行人工审核
-- 支持 auto-review 预览/草稿生成，并输出 skip reasons 解释为什么跳过
+- 支持 auto-review 预览和安全决策草稿，并输出 skip reasons 解释为什么跳过
 - 将审核后的正式记忆写入 `memory_cards.jsonl`
 - 派生生成可读的 `MEMORY.md`
 - 按项目生成 AI 可用上下文，并返回 relevance diagnostics 解释召回原因
 - 提供 FastAPI 审核页面 `/memory-review`
+
+普通候选需要来自两个不同 `event_id` 的证据才会进入 review queue；带 `explicit` 标签的明确长期指令只需要一个有效 `event_id`。未达门槛的候选仍保留在 candidate 和 `DREAMS.md` 产物中，后续 `sync` 导入新的独立证据后可重新评估。
+
+`auto-review` 和 `sync --auto` 不会批准 `create`、`review` 或 `merge`。正式记忆的创建和合并始终需要人工审核；自动流程只兼容处理旧队列中的拒绝和证据不足决策。
 
 ## 安装与运行
 
@@ -201,12 +205,12 @@ uv run dream-memory review-summary --run-id <run_id>
 
 # 可选：先预览自动审核影响，不写 reviewed.jsonl、不改 run state
 uv run dream-memory auto-review --run-id <run_id> --min-score 0.7 --dry-run
-# 按规则自动生成高置信 reviewed 草稿；输出 approved/rejected/skipped/skip_reasons
+# 生成安全 reviewed 草稿；create/review/merge 只报告 requires_manual_review
 uv run dream-memory auto-review --run-id <run_id> --min-score 0.7
 # 如果 reviewed.jsonl 已存在，auto-review 默认拒绝覆盖；确认要重写时添加 --force
 # 默认跳过重复候选；如需写入重复候选的 rejected 决策，添加 --include-duplicates
-# 默认跳过 merge 候选，避免自动覆盖既有记忆；确认要自动合并时添加 --include-merges
-# skip_reasons 会解释跳过原因，例如 duplicate / below_min_score / requires_manual_review / merge_requires_explicit_include
+# --include-merges / --include-review 为兼容参数，不会绕过人工审核门禁
+# skip_reasons 会解释跳过原因，例如 duplicate / requires_manual_review
 
 # 人工审核后恢复并 apply
 uv run dream-memory resume --run-id <run_id>
@@ -232,7 +236,7 @@ Web API 也支持 run 状态查询：
 - `POST /api/memory/runs/{run_id}/auto-review`
 
 
-Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 run 后会优先读取该 run 的 `review_queue.jsonl`，展示候选记忆、冲突信息、审核建议、审核进度、候选汇总、Dream Analysis、Quality Signals 和 trace。候选会按状态分组；候选汇总会按 suggested action、类型、scope、证据质量、重复数、冲突数、低分数和分数区间给出总览，便于先判断这批候选是否值得逐条审核。审核结果会写入 run 专属的 `reviewed.jsonl`。页面内置自动审核预览：可以先查看将批准/跳过的候选、skip reasons、分数和原因；只有点击写入 reviewed 才会落盘，且默认不覆盖已有 `reviewed.jsonl`，需要勾选覆盖才会重写。Web API 也提供 `POST /api/memory/runs/start` 用于启动 run，`POST /api/memory/runs/{run_id}/resume` 用于审核后恢复并应用正式记忆。
+Web 审核页 `/memory-review` 会轮询 run 状态并展示最近 run，选择 run 后会优先读取该 run 的 `review_queue.jsonl`，展示候选记忆、冲突信息、审核建议、审核进度、候选汇总、Dream Analysis、Quality Signals 和 trace。候选会按状态分组；候选汇总会按 suggested action、类型、scope、证据质量、重复数、冲突数、低分数和分数区间给出总览，便于先判断这批候选是否值得逐条审核。审核结果会写入 run 专属的 `reviewed.jsonl`。页面内置自动审核预览：可以先查看自动拒绝、证据不足和必须人工审核的候选、skip reasons、分数和原因；只有点击写入 reviewed 才会落盘，且默认不覆盖已有 `reviewed.jsonl`，需要勾选覆盖才会重写。Web API 也提供 `POST /api/memory/runs/start` 用于启动 run，`POST /api/memory/runs/{run_id}/resume` 用于审核后恢复并应用正式记忆。
 
 
 ## 上下文召回诊断
@@ -281,7 +285,7 @@ uv run dream-memory summary --scope all-projects --output .dream-memory/PROJECTS
 - `ai-candidates.jsonl`：AI 候选记忆
 - `candidates.jsonl`：规则 fallback 候选记忆
 - `review_queue.jsonl`：待人工审核队列
-- `reviewed.jsonl`：Web/人工审核提交，也可由 `auto-review` 为高置信候选生成草稿；默认不会被覆盖
+- `reviewed.jsonl`：Web/人工审核提交；`auto-review` 只会写入安全的拒绝或证据不足决策，默认不会覆盖已有文件
 - `review_decisions.jsonl`：审核决策流水账
 - `memory_cards.jsonl`：正式记忆卡片状态
 - `MEMORY.md`：正式记忆的人类可读投影
@@ -306,7 +310,7 @@ http://127.0.0.1:8000/memory-review
 - “预览”只调用 `/auto-review/preview`，不会写入文件
 - “写入 reviewed”调用 `/auto-review`，默认不覆盖已有审核文件
 - 如需覆盖已有草稿或人工审核文件，先勾选“覆盖现有 reviewed”
-- 可以勾选“包含重复项”或“包含合并项”来显式允许自动写入 duplicate / merge 类型决策
+- “包含重复项”可允许自动写入重复候选的拒绝决策；“包含合并项”不会绕过人工合并门禁
 
 ## 更多文档
 
@@ -354,9 +358,9 @@ uv run dream-memory eval \
   --output .dream-memory/eval.ai.json
 ```
 
-当前维护的 `examples/labeled-events.jsonl` 覆盖 13 行评估样本，包含用户偏好、项目事实、产品方向、人工审核门禁、失败教训、一次性任务噪声、内部上下文噪声、重复记忆、rejected option、凭据位置噪声、跨项目项目事实隔离，以及跨项目用户级偏好保留。自包含初始化会把示例评估项目设为 `/tmp/project`，因此 `dream-memory --config <dir>/config.json eval` 可直接复现基准结果。
+当前维护的 `examples/labeled-events.jsonl` 覆盖 16 行评估样本，包含用户偏好、项目事实、产品方向、人工审核门禁、失败教训、一次性任务噪声、内部上下文噪声、重复记忆、rejected option、凭据位置噪声、跨项目隔离，以及单事件、重复事件和双事件普通偏好的证据门禁。自包含初始化会把示例评估项目设为 `/tmp/project`，因此 `dream-memory --config <dir>/config.json eval` 可直接复现基准结果。
 
-如果模型服务不稳定，可显式记录 AI 失败并回退到规则抽取，报告会同时输出 `extraction_success_count`、`extraction_error_count`、`fallback_count` 和 `fallback_empty_count`，避免把规则兜底误读成纯 AI 效果。AI 评估报告中的 `raw_candidate_count` 是单行模型原始候选数，`scored_candidate_count` 是单行经过 reject / 敏感证据过滤后真正计入 precision 的候选数；顶层 `raw_candidate_total` / `fallback_candidate_total` / `scored_candidate_total` 汇总全量原始候选、规则兜底候选和计分候选：
+如果模型服务不稳定，可显式记录 AI 失败并回退到规则抽取，报告会同时输出 `extraction_success_count`、`extraction_error_count`、`fallback_count` 和 `fallback_empty_count`，避免把规则兜底误读成纯 AI 效果。AI 评估报告中的 `raw_candidate_count` 是单行模型原始候选数，`scored_candidate_count` 是经过 Dream Analysis 后真正计入 precision 的候选数；顶层 `raw_candidate_total` / `fallback_candidate_total` / `scored_candidate_total` 汇总全量原始候选、规则兜底候选和计分候选，`deferred_candidate_count` 记录因独立证据不足而延迟的候选：
 
 ```bash
 uv run dream-memory eval \

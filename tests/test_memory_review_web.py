@@ -542,9 +542,10 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertTrue(payload["dry_run"])
-            self.assertEqual(payload["decision_count"], 1)
-            self.assertEqual(payload["skip_reasons"]["below_min_score"], 1)
-            self.assertEqual(payload["preview"][0]["decision"], "approved")
+            self.assertEqual(payload["decision_count"], 0)
+            self.assertEqual(payload["skip_reasons"], {"requires_manual_review": 2})
+            self.assertEqual([row["decision"] for row in payload["preview"]], ["skip", "skip"])
+            self.assertEqual({row["reason"] for row in payload["preview"]}, {"requires_manual_review"})
             self.assertFalse((Path(state["run_dir"]) / "reviewed.jsonl").exists())
 
     def test_api_memory_run_auto_review_apply_refuses_existing_reviewed_without_force(self):
@@ -569,10 +570,10 @@ class MemoryReviewWebTests(unittest.TestCase):
             force_response = client.post(f"/api/memory/runs/{state['run_id']}/auto-review", json={"min_score": 0.7, "force": True})
 
             self.assertEqual(force_response.status_code, 200)
-            overwritten = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(overwritten[0]["candidate_id"], "create_1")
+            self.assertEqual(force_response.json()["decision_count"], 0)
+            self.assertEqual(reviewed_path.read_text(encoding="utf-8"), "")
 
-    def test_api_memory_run_auto_review_apply_writes_reviewed(self):
+    def test_api_memory_run_auto_review_apply_writes_manual_only_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
             state = create_run_state(memory_dir=memory_dir, project="/tmp/project", input_path="events.jsonl", mode="rules", model="rules", invoke_model=False)
@@ -587,9 +588,9 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertFalse(payload["dry_run"])
-            self.assertEqual(payload["decision_count"], 1)
-            rows = [json.loads(line) for line in (Path(state["run_dir"]) / "reviewed.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(rows[0]["action"], "approved")
+            self.assertEqual(payload["decision_count"], 0)
+            self.assertEqual(payload["skip_reasons"], {"requires_manual_review": 1})
+            self.assertEqual((Path(state["run_dir"]) / "reviewed.jsonl").read_text(encoding="utf-8"), "")
 
     def test_api_memory_run_auto_review_preview_respects_include_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -611,10 +612,12 @@ class MemoryReviewWebTests(unittest.TestCase):
             self.assertEqual(include_response.status_code, 200)
             default_reasons = {row["candidate_id"]: row["reason"] for row in default_response.json()["preview"]}
             include_decisions = {row["candidate_id"]: row["decision"] for row in include_response.json()["preview"]}
+            include_reasons = {row["candidate_id"]: row["reason"] for row in include_response.json()["preview"]}
             self.assertEqual(default_reasons["dup_1"], "duplicate")
-            self.assertEqual(default_reasons["merge_1"], "merge_requires_explicit_include")
+            self.assertEqual(default_reasons["merge_1"], "requires_manual_review")
             self.assertEqual(include_decisions["dup_1"], "rejected")
-            self.assertEqual(include_decisions["merge_1"], "merged")
+            self.assertEqual(include_decisions["merge_1"], "skip")
+            self.assertEqual(include_reasons["merge_1"], "requires_manual_review")
 
     def test_api_memory_run_review_progress_counts_pending_and_reviewed(self):
         with tempfile.TemporaryDirectory() as tmp:

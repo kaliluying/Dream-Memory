@@ -7,6 +7,7 @@ from dream_memory.memory_agent import build_memory_extraction_prompt
 from dream_memory.memory_dreaming import (
     DreamResult,
     analyze_dream_candidate,
+    apply_dream_analysis_to_candidates,
     apply_reviewed_memory,
     build_agent_context,
     build_candidates_from_facts,
@@ -125,8 +126,8 @@ class MemoryDreamingTests(unittest.TestCase):
                     "confidence": 0.95,
                     "decision": "promote",
                     "reason": "explicit user request",
-                    "evidence": [{"source": "codex"}],
-                    "tags": ["claude-code"],
+                    "evidence": [{"event_id": "event_1", "source": "codex"}],
+                    "tags": ["claude-code", "explicit"],
                 }
             ]
 
@@ -190,6 +191,31 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(len(autonomy), 1)
         self.assertEqual(review_gate[0]["evidence_refs"], ["event_1", "event_2"])
         self.assertEqual(autonomy[0]["evidence_refs"], ["event_3", "event_4"])
+
+    def test_build_candidates_from_facts_deduplicates_same_event_id(self):
+        facts = [
+            {
+                "fact_type": "preference",
+                "statement": "User prefers concise answers.",
+                "scope": "user",
+                "project": None,
+                "tags": ["preference"],
+                "evidence": [{"event_id": "event_1", "source": "codex"}],
+            },
+            {
+                "fact_type": "preference",
+                "statement": "User prefers concise answers.",
+                "scope": "user",
+                "project": None,
+                "tags": ["preference"],
+                "evidence": [{"event_id": "event_1", "source": "codex"}],
+            },
+        ]
+
+        candidates = build_candidates_from_facts(facts)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual([item["event_id"] for item in candidates[0]["evidence"]], ["event_1"])
 
     def test_extract_atomic_facts_creates_fact_records(self):
         events = [
@@ -262,6 +288,8 @@ class MemoryDreamingTests(unittest.TestCase):
             "project": None,
             "type": "preference",
             "content": "用户偏好在上下文清楚时由助手按判断直接推进，不要反复询问确认。",
+            "score": 0.8,
+            "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
         }]
         cards = [{
             "id": "language",
@@ -360,15 +388,54 @@ class MemoryDreamingTests(unittest.TestCase):
 
         queue = build_review_queue(candidates, memory_cards)
         by_id = {item["candidate_id"]: item for item in queue}
+        analyzed = {
+            item["id"]: item
+            for item in apply_dream_analysis_to_candidates(candidates, memory_cards)
+        }
 
-        self.assertEqual(by_id["cand_duplicate"]["suggested_action"], "reject")
-        self.assertTrue(by_id["cand_duplicate"]["quality_signals"]["duplicate"])
-        self.assertEqual(by_id["cand_duplicate"]["quality_signals"]["matched_memory_id"], "mem_same")
+        self.assertEqual(set(by_id), {"cand_replace"})
+        self.assertEqual(analyzed["cand_duplicate"]["dream_analysis"]["suggested_action"], "reject")
+        self.assertTrue(analyzed["cand_duplicate"]["quality_signals"]["duplicate"])
+        self.assertEqual(analyzed["cand_duplicate"]["quality_signals"]["matched_memory_id"], "mem_same")
         self.assertEqual(by_id["cand_replace"]["suggested_action"], "merge")
         self.assertEqual(by_id["cand_replace"]["quality_signals"]["matched_memory_id"], "mem_same")
         self.assertGreater(by_id["cand_replace"]["quality_signals"]["evidence_strength"], 0)
-        self.assertEqual(by_id["cand_more_evidence"]["suggested_action"], "needs_more_evidence")
-        self.assertEqual(by_id["cand_more_evidence"]["quality_signals"]["evidence_strength"], 0)
+        self.assertEqual(analyzed["cand_more_evidence"]["dream_analysis"]["suggested_action"], "needs_more_evidence")
+        self.assertEqual(analyzed["cand_more_evidence"]["quality_signals"]["evidence_strength"], 0)
+
+    def test_build_review_queue_excludes_needs_more_evidence(self):
+        candidates = [{
+            "id": "cand_single",
+            "type": "preference",
+            "scope": "user",
+            "project": None,
+            "content": "User prefers concise answers.",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [{"event_id": "event_1", "source": "codex"}],
+        }]
+
+        self.assertEqual(build_review_queue(candidates, []), [])
+
+    def test_build_review_queue_includes_two_event_candidate(self):
+        candidates = [{
+            "id": "cand_repeated",
+            "type": "preference",
+            "scope": "user",
+            "project": None,
+            "content": "User prefers concise answers.",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [
+                {"event_id": "event_1", "source": "codex"},
+                {"event_id": "event_2", "source": "claude_code"},
+            ],
+        }]
+
+        queue = build_review_queue(candidates, [])
+
+        self.assertEqual(len(queue), 1)
+        self.assertIn(queue[0]["suggested_action"], {"create", "review"})
 
     def test_build_review_queue_explains_duplicate_existing_memory_match(self):
         candidates = [{
@@ -391,9 +458,10 @@ class MemoryDreamingTests(unittest.TestCase):
         }]
 
         queue = build_review_queue(candidates, memory_cards)
-        signals = queue[0]["quality_signals"]
-        analysis = queue[0]["dream_analysis"]
+        signals = explain_candidate_quality(candidates[0], memory_cards)
+        analysis = analyze_dream_candidate(candidates[0], quality_signals=signals, conflicts=[])
 
+        self.assertEqual(queue, [])
         self.assertTrue(signals["duplicate"])
         self.assertEqual(signals["value_class"], "existing_duplicate")
         self.assertEqual(signals["matched_memory_id"], "mem_same")
@@ -421,7 +489,7 @@ class MemoryDreamingTests(unittest.TestCase):
                 "content": "Python 项目使用 uv 进行包管理和命令执行。",
                 "score": 0.9,
                 "status": "promote",
-                "evidence": [{"event_id": "event_2"}],
+                "evidence": [{"event_id": "event_2"}, {"event_id": "event_3"}],
                 "tags": ["package-manager", "uv"],
             },
         ]
@@ -469,7 +537,7 @@ class MemoryDreamingTests(unittest.TestCase):
             "content": "正式记忆必须经过人工审核，只有审核通过的候选才允许写入长期记忆。",
             "score": 0.76,
             "status": "review",
-            "evidence": [{"event_id": "event_1"}],
+            "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
         }]
 
         queue = build_review_queue(candidates, candidates)
@@ -536,6 +604,82 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(analysis["suggested_action"], "needs_more_evidence")
         self.assertIn("missing evidence", analysis["penalties"])
 
+    def test_analyze_dream_candidate_requires_two_independent_events(self):
+        candidate = {
+            "id": "mem_editor",
+            "type": "preference",
+            "scope": "user",
+            "content": "User prefers a concise code editor.",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [{"event_id": "event_1", "source": "codex"}],
+        }
+
+        signals = explain_candidate_quality(candidate, [])
+        analysis = analyze_dream_candidate(candidate, quality_signals=signals, conflicts=[])
+
+        self.assertEqual(analysis["suggested_action"], "needs_more_evidence")
+        self.assertEqual(analysis["independent_evidence_count"], 1)
+        self.assertEqual(analysis["required_evidence_count"], 2)
+
+    def test_analyze_dream_candidate_counts_duplicate_event_id_once(self):
+        candidate = {
+            "id": "mem_editor",
+            "type": "preference",
+            "scope": "user",
+            "content": "User prefers a concise code editor.",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [
+                {"event_id": "event_1", "source": "codex"},
+                {"event_id": "event_1", "source": "codex"},
+            ],
+        }
+
+        signals = explain_candidate_quality(candidate, [])
+        analysis = analyze_dream_candidate(candidate, quality_signals=signals, conflicts=[])
+
+        self.assertEqual(analysis["suggested_action"], "needs_more_evidence")
+        self.assertEqual(analysis["independent_evidence_count"], 1)
+
+    def test_analyze_dream_candidate_accepts_two_independent_events(self):
+        candidate = {
+            "id": "mem_editor",
+            "type": "preference",
+            "scope": "user",
+            "content": "User prefers a concise code editor.",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [
+                {"event_id": "event_1", "source": "codex"},
+                {"event_id": "event_2", "source": "claude_code"},
+            ],
+        }
+
+        signals = explain_candidate_quality(candidate, [])
+        analysis = analyze_dream_candidate(candidate, quality_signals=signals, conflicts=[])
+
+        self.assertIn(analysis["suggested_action"], {"create", "review"})
+        self.assertEqual(analysis["independent_evidence_count"], 2)
+
+    def test_analyze_dream_candidate_requires_event_id_for_explicit_instruction(self):
+        candidate = {
+            "id": "mem_language",
+            "type": "preference",
+            "scope": "user",
+            "content": "Always answer the user in Chinese.",
+            "score": 0.95,
+            "tags": ["language", "explicit"],
+            "evidence": [{"source": "codex", "event_type": "global_instruction"}],
+        }
+
+        signals = explain_candidate_quality(candidate, [])
+        analysis = analyze_dream_candidate(candidate, quality_signals=signals, conflicts=[])
+
+        self.assertEqual(signals["evidence_quality"], "explicit_instruction")
+        self.assertEqual(analysis["suggested_action"], "needs_more_evidence")
+        self.assertEqual(analysis["required_evidence_count"], 1)
+
     def test_analyze_dream_candidate_promotes_explicit_user_preference_with_single_strong_evidence(self):
         candidate = {
             "id": "mem_language",
@@ -553,6 +697,8 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(signals["evidence_quality"], "explicit_instruction")
         self.assertGreaterEqual(signals["evidence_strength"], 0.5)
         self.assertEqual(analysis["suggested_action"], "create")
+        self.assertEqual(analysis["independent_evidence_count"], 1)
+        self.assertEqual(analysis["required_evidence_count"], 1)
 
     def test_analyze_dream_candidate_creates_durable_memory(self):
         candidate = {
@@ -591,7 +737,7 @@ class MemoryDreamingTests(unittest.TestCase):
             "project": "/tmp/project",
             "content": "Run targeted tests before memory changes.",
             "score": 0.8,
-            "evidence": [{"event_id": "event_1"}],
+            "evidence": [{"event_id": "event_1"}, {"event_id": "event_2"}],
         }
         analysis = analyze_dream_candidate(
             candidate,
@@ -621,7 +767,10 @@ class MemoryDreamingTests(unittest.TestCase):
             "score": 0.88,
             "status": "review",
             "tags": ["framework", "python", "fastapi"],
-            "evidence": [{"event_id": "event_1", "event_type": "project_markers"}],
+            "evidence": [
+                {"event_id": "event_1", "event_type": "project_markers"},
+                {"event_id": "event_2", "event_type": "project_markers"},
+            ],
         }]
 
         queue = build_review_queue(candidates, [])
@@ -669,10 +818,12 @@ class MemoryDreamingTests(unittest.TestCase):
         ]
 
         queue = build_review_queue(candidates, [])
+        signals = explain_candidate_quality(candidates[0], [])
+        analysis = analyze_dream_candidate(candidates[0], quality_signals=signals, conflicts=[])
 
-        self.assertEqual(queue[0]["suggested_action"], "reject")
-        self.assertEqual(queue[0]["dream_analysis"]["suggested_action"], "reject")
-        self.assertIn("one-off task", queue[0]["dream_analysis"]["penalties"])
+        self.assertEqual(queue, [])
+        self.assertEqual(analysis["suggested_action"], "reject")
+        self.assertIn("one-off task", analysis["penalties"])
 
     def test_build_review_queue_matches_most_similar_conflict(self):
         candidates = [
@@ -1045,6 +1196,7 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(candidates[0]["type"], "pitfall")
         self.assertEqual(candidates[0]["scope"], "user")
         self.assertIn("不要只看 API 返回成功", candidates[0]["content"])
+        self.assertIn("explicit", candidates[0]["tags"])
 
     def test_extract_atomic_facts_promotes_rejected_auto_apply_memory_option(self):
         events = [{
@@ -1061,6 +1213,7 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(candidates[0]["type"], "rejected_option")
         self.assertEqual(candidates[0]["scope"], "project")
         self.assertIn("不要把未经审核的候选自动写入", candidates[0]["content"])
+        self.assertIn("explicit", candidates[0]["tags"])
 
     def test_extract_atomic_facts_promotes_project_package_manager_instructions(self):
         events = [{
@@ -1093,8 +1246,10 @@ class MemoryDreamingTests(unittest.TestCase):
 
         self.assertIn("product_direction", by_type)
         self.assertIn("共享记忆", by_type["product_direction"]["content"])
+        self.assertIn("explicit", by_type["product_direction"]["tags"])
         self.assertIn("workflow", by_type)
         self.assertIn("人工审核", by_type["workflow"]["content"])
+        self.assertIn("explicit", by_type["workflow"]["tags"])
         self.assertFalse(any(candidate["type"] == "requirement" for candidate in candidates))
 
     def test_extract_atomic_facts_ignores_short_one_off_requirements(self):

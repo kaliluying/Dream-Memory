@@ -725,29 +725,18 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
         suggested_action = str(item.get("suggested_action") or analysis.get("suggested_action") or "review")
         score = _dream_score(item)
         review_action: str | None = None
-        if suggested_action == "create" and score >= float(args.min_score):
-            review_action = "approved"
-            approved += 1
-        elif suggested_action == "merge" and score >= float(args.min_score):
-            if bool(getattr(args, "include_merges", False)):
-                review_action = "merged"
-                approved += 1
-            else:
-                skip("merge_requires_explicit_include")
+        if suggested_action in {"create", "merge", "review"}:
+            skip("requires_manual_review")
+            if suggested_action == "merge":
                 merge_skipped += 1
-                continue
+            continue
         elif suggested_action == "reject":
             review_action = "rejected"
             rejected += 1
         elif not args.keep_review and suggested_action == "needs_more_evidence":
             review_action = "needs_more_evidence"
             needs_more_evidence += 1
-        elif suggested_action in {"create", "merge"} and score < float(args.min_score):
-            skip("below_min_score")
-        elif suggested_action == "review" and bool(getattr(args, "include_review", False)) and score >= float(args.min_score):
-            review_action = "approved"
-            approved += 1
-        elif suggested_action in {"review", "needs_more_evidence"}:
+        elif suggested_action == "needs_more_evidence":
             skip("requires_manual_review")
         else:
             skip("unhandled_action")

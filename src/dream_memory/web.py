@@ -179,9 +179,7 @@ def _auto_review_namespace(run_id: str, request: MemoryAutoReviewRequest, memory
 
 def _auto_review_preview_from_queue(queue: list[dict[str, Any]], payload: dict[str, Any], request: MemoryAutoReviewRequest) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    min_score = float(payload.get("min_score") or 0.0)
     include_duplicates = bool(request.include_duplicates)
-    include_merges = bool(request.include_merges)
     keep_review = bool(request.keep_review)
     for item in queue:
         candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
@@ -198,24 +196,15 @@ def _auto_review_preview_from_queue(queue: list[dict[str, Any]], payload: dict[s
             reason = "missing_candidate"
         elif quality.get("duplicate") and not include_duplicates:
             reason = "duplicate"
-        elif suggested in {"create", "merge"} and score_value < min_score:
-            reason = "below_min_score"
-        elif suggested == "create":
-            decision = "approved"
-            reason = "meets_min_score"
-        elif suggested == "merge":
-            if include_merges:
-                decision = "merged"
-                reason = "include_merges"
-            else:
-                reason = "merge_requires_explicit_include"
+        elif suggested in {"create", "merge", "review"}:
+            reason = "requires_manual_review"
         elif suggested == "reject":
             decision = "rejected"
             reason = "suggested_reject"
         elif suggested == "needs_more_evidence" and not keep_review:
             decision = "needs_more_evidence"
             reason = "needs_more_evidence"
-        elif suggested in {"review", "needs_more_evidence"}:
+        elif suggested == "needs_more_evidence":
             reason = "requires_manual_review"
         else:
             reason = "unhandled_action"

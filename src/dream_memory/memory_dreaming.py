@@ -828,7 +828,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 project=str(event_project) if event_project else None,
                 source_event=event,
                 confidence=0.86,
-                tags=["rejected-option", "memory-safety", "review-gate"],
+                tags=["rejected-option", "memory-safety", "review-gate", "explicit"],
             ))
             continue
 
@@ -904,7 +904,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 project=str(event_project) if event_project else None,
                 source_event=event,
                 confidence=0.9,
-                tags=["product-direction", "memory", "claude-code", "codex"],
+                tags=["product-direction", "memory", "claude-code", "codex", "explicit"],
             ))
             continue
 
@@ -916,7 +916,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 project=str(event_project) if event_project else None,
                 source_event=event,
                 confidence=0.9,
-                tags=["review-gate", "memory-safety"],
+                tags=["review-gate", "memory-safety", "explicit"],
             ))
             continue
 
@@ -952,7 +952,7 @@ def extract_atomic_facts(events: list[dict[str, Any]], *, project: str | None) -
                 project=None,
                 source_event=event,
                 confidence=0.88,
-                tags=["pitfall", "ui-validation", "real-flow"],
+                tags=["pitfall", "ui-validation", "real-flow", "explicit"],
             ))
             continue
 
@@ -1066,8 +1066,11 @@ def build_candidates_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, A
             for evidence in evidence_items:
                 if not isinstance(evidence, dict):
                     continue
+                event_id = str(evidence.get("event_id") or evidence.get("id") or "").strip()
+                if event_id and event_id in _independent_evidence_event_ids(candidate):
+                    continue
                 candidate["evidence"].append({
-                    "event_id": evidence.get("event_id") or evidence.get("id"),
+                    "event_id": event_id or None,
                     "source": evidence.get("source") or fact.get("source"),
                     "session_id": evidence.get("session_id") or fact.get("session_id"),
                     "quote": evidence.get("quote"),
@@ -1075,8 +1078,11 @@ def build_candidates_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, A
                 })
         else:
             for ref in fact.get("evidence_refs", []):
+                event_id = str(ref or "").strip()
+                if event_id and event_id in _independent_evidence_event_ids(candidate):
+                    continue
                 candidate["evidence"].append({
-                    "event_id": ref,
+                    "event_id": event_id or None,
                     "source": fact.get("source"),
                     "session_id": fact.get("session_id"),
                     "content_hash": _content_hash(content),
@@ -1178,6 +1184,17 @@ def _intent_relevance_boost(task: str | None, searchable: str) -> float:
             if "framework" in normalized_searchable or "fastapi" in normalized_searchable or "python web" in normalized_searchable:
                 return 1.05
     return boost
+
+
+def _independent_evidence_event_ids(candidate: dict[str, Any]) -> set[str]:
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, list):
+        return set()
+    return {
+        str(item.get("event_id") or "").strip()
+        for item in evidence
+        if isinstance(item, dict) and str(item.get("event_id") or "").strip()
+    }
 
 
 def explain_candidate_quality(candidate: dict[str, Any], memory_cards: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1295,6 +1312,9 @@ def analyze_dream_candidate(
     reuse_value = _quality_float(quality_signals, "reuse_value")
     evidence_strength = _quality_float(quality_signals, "evidence_strength")
     base_score = _candidate_score(candidate)
+    independent_evidence_count = len(_independent_evidence_event_ids(candidate))
+    explicit_instruction = str(quality_signals.get("evidence_quality") or "") == "explicit_instruction"
+    required_evidence_count = 1 if explicit_instruction else 2
     dream_score = round(
         stability * 0.4
         + reuse_value * 0.4
@@ -1336,6 +1356,12 @@ def analyze_dream_candidate(
     elif require_evidence and evidence_strength <= 0:
         suggested_action = "needs_more_evidence"
         decision_reason = "candidate needs evidence before promotion"
+    elif independent_evidence_count < required_evidence_count:
+        suggested_action = "needs_more_evidence"
+        decision_reason = (
+            f"candidate has {independent_evidence_count} independent evidence events; "
+            f"{required_evidence_count} required"
+        )
     elif (conflicts or quality_signals.get("matched_memory_id")) and dream_score >= review_threshold:
         suggested_action = conflict_action
         decision_reason = f"candidate overlaps existing memory {quality_signals.get('matched_memory_id') or 'unknown'}"
@@ -1356,6 +1382,8 @@ def analyze_dream_candidate(
         "penalties": penalties,
         "matched_memory_id": quality_signals.get("matched_memory_id"),
         "decision_reason": decision_reason,
+        "independent_evidence_count": independent_evidence_count,
+        "required_evidence_count": required_evidence_count,
         "policy": {
             "promote_threshold": promote_threshold,
             "review_threshold": review_threshold,
@@ -1416,6 +1444,8 @@ def build_review_queue(candidates: list[dict[str, Any]], memory_cards: list[dict
             quality_signals=quality_signals,
             conflicts=conflicts,
         )
+        if dream_analysis["suggested_action"] not in {"create", "review", "merge"}:
+            continue
         queue.append(build_review_queue_item(
             candidate=candidate,
             conflicts=conflicts,

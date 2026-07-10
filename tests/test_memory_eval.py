@@ -106,7 +106,15 @@ class MemoryEvalTests(unittest.TestCase):
 
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
-                    ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], {"candidate_count": 1}),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], {"candidate_count": 1}),
                     RuntimeError("boom"),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", continue_on_error=True)
@@ -125,7 +133,18 @@ class MemoryEvalTests(unittest.TestCase):
             }, ensure_ascii=False) + "\n", encoding="utf-8")
 
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
-                extract.side_effect = [([], {"candidate_count": 0}), ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], None)]
+                extract.side_effect = [
+                    ([], {"candidate_count": 0}),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], None),
+                ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", fallback_rules_on_empty=True)
 
             self.assertEqual(result["fallback_count"], 1)
@@ -145,7 +164,15 @@ class MemoryEvalTests(unittest.TestCase):
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
                     ([{"content": "一次性任务", "type": "workflow", "scope": "session", "status": "reject"}], {"candidate_count": 1}),
-                    ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], None),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], None),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", fallback_rules_on_empty=True)
 
@@ -173,7 +200,15 @@ class MemoryEvalTests(unittest.TestCase):
 
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
-                    ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], {"candidate_count": 1}),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], {"candidate_count": 1}),
                     RuntimeError("boom"),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", continue_on_error=True)
@@ -199,6 +234,63 @@ class MemoryEvalTests(unittest.TestCase):
         self.assertEqual(result["predicted_total"], 0)
         self.assertEqual(result["false_positive_count"], 0)
         self.assertEqual(result["precision"], 0.0)
+
+    def test_eval_excludes_needs_more_evidence_from_predictions(self):
+        candidate = {
+            "id": "mem_editor",
+            "content": "User prefers concise answers.",
+            "type": "preference",
+            "scope": "user",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [{"event_id": "event_1", "source": "codex"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            path.write_text(json.dumps({
+                "id": "weak",
+                "events": [],
+                "expected": [],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with patch("dream_memory.memory_eval._extract_candidates", return_value=([candidate], None)):
+                result = evaluate_labeled_events(path, project=None, mode="rules")
+
+        self.assertEqual(result["predicted_total"], 0)
+        self.assertEqual(result["deferred_candidate_count"], 1)
+        self.assertEqual(result["false_positive_count"], 0)
+
+    def test_eval_counts_two_event_candidate_as_prediction(self):
+        candidate = {
+            "id": "mem_editor",
+            "content": "User prefers concise answers.",
+            "type": "preference",
+            "scope": "user",
+            "score": 0.95,
+            "tags": ["preference"],
+            "evidence": [
+                {"event_id": "event_1", "source": "codex"},
+                {"event_id": "event_2", "source": "claude_code"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            path.write_text(json.dumps({
+                "id": "repeated",
+                "events": [],
+                "expected": [{
+                    "content": "User prefers concise answers.",
+                    "type": "preference",
+                    "scope": "user",
+                }],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with patch("dream_memory.memory_eval._extract_candidates", return_value=([candidate], None)):
+                result = evaluate_labeled_events(path, project=None, mode="rules")
+
+        self.assertEqual(result["predicted_total"], 1)
+        self.assertEqual(result["true_positive"], 1)
+        self.assertEqual(result["deferred_candidate_count"], 0)
 
 
     def test_eval_report_includes_scored_candidate_count_after_filtering_rejects(self):
@@ -233,7 +325,15 @@ class MemoryEvalTests(unittest.TestCase):
 
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
-                    ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], {"candidate_count": 1}),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], {"candidate_count": 1}),
                     ([{"content": "一次性任务", "type": "workflow", "scope": "session", "status": "reject"}], {"candidate_count": 1}),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai")
@@ -255,7 +355,15 @@ class MemoryEvalTests(unittest.TestCase):
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
                     ([], {"candidate_count": 0}),
-                    ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], None),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], None),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", fallback_rules_on_empty=True)
 
@@ -277,7 +385,15 @@ class MemoryEvalTests(unittest.TestCase):
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
                     RuntimeError("model down"),
-                    ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], None),
+                    ([{
+                        "id": "mem_language",
+                        "content": "用户偏好中文回答。",
+                        "type": "preference",
+                        "scope": "user",
+                        "score": 0.95,
+                        "tags": ["language", "explicit"],
+                        "evidence": [{"event_id": "event_1", "event_type": "global_instruction"}],
+                    }], None),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", continue_on_error=True, fallback_rules_on_error=True)
 

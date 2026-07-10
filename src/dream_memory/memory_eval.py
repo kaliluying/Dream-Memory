@@ -4,7 +4,14 @@ from pathlib import Path
 from typing import Any
 
 from .memory_agent import agent_extract_memory_candidates
-from .memory_dreaming import build_candidates_from_facts, extract_atomic_facts, load_events_jsonl, normalize_memory_text, _text_similarity
+from .memory_dreaming import (
+    _text_similarity,
+    apply_dream_analysis_to_candidates,
+    build_candidates_from_facts,
+    extract_atomic_facts,
+    load_events_jsonl,
+    normalize_memory_text,
+)
 
 
 def _row_events(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -52,8 +59,25 @@ def _matches_expected(candidate: dict[str, Any], expected: dict[str, Any]) -> bo
     return bool(type_match and scope_match and text_match)
 
 
-def _scored_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [candidate for candidate in candidates if str(candidate.get("status") or candidate.get("decision") or "").strip() != "reject"]
+def _scored_candidates(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    normalized = []
+    for index, candidate in enumerate(candidates, start=1):
+        item = dict(candidate)
+        item.setdefault("id", f"eval_candidate_{index}")
+        normalized.append(item)
+    analyzed = apply_dream_analysis_to_candidates(normalized, [])
+    deferred = len([
+        candidate
+        for candidate in analyzed
+        if str((candidate.get("dream_analysis") or {}).get("suggested_action") or "")
+        == "needs_more_evidence"
+    ])
+    return [
+        candidate
+        for candidate in analyzed
+        if str((candidate.get("dream_analysis") or {}).get("suggested_action") or "")
+        in {"create", "review", "merge"}
+    ], deferred
 
 
 def _extract_candidates(
@@ -119,6 +143,7 @@ def evaluate_labeled_events(
     raw_candidate_total = 0
     scored_candidate_total = 0
     fallback_candidate_total = 0
+    deferred_candidate_total = 0
 
     for row_index, row in enumerate(rows, start=1):
         row_label = _row_label(row, row_index)
@@ -148,7 +173,8 @@ def evaluate_labeled_events(
             })
             if fallback_rules_on_error:
                 candidates, _ = _extract_candidates(events, project=project, mode="rules")
-                candidates = _scored_candidates(candidates)
+                candidates, deferred_count = _scored_candidates(candidates)
+                deferred_candidate_total += deferred_count
                 fallback_candidate_count = len(candidates)
                 fallback_candidate_total += fallback_candidate_count
                 extraction_meta = {"fallback": "rules", "candidate_count": len(candidates)}
@@ -159,10 +185,12 @@ def evaluate_labeled_events(
         else:
             raw_candidate_count = len(candidates)
             raw_candidate_total += raw_candidate_count
-            candidates = _scored_candidates(candidates)
+            candidates, deferred_count = _scored_candidates(candidates)
+            deferred_candidate_total += deferred_count
         if mode == "ai" and fallback_rules_on_empty and not candidates:
             fallback_candidates, _ = _extract_candidates(events, project=project, mode="rules")
-            fallback_candidates = _scored_candidates(fallback_candidates)
+            fallback_candidates, deferred_count = _scored_candidates(fallback_candidates)
+            deferred_candidate_total += deferred_count
             if fallback_candidates:
                 fallback_candidate_count = len(fallback_candidates)
                 fallback_candidate_total += fallback_candidate_count
@@ -207,6 +235,7 @@ def evaluate_labeled_events(
         "raw_candidate_total": raw_candidate_total,
         "fallback_candidate_total": fallback_candidate_total,
         "scored_candidate_total": scored_candidate_total,
+        "deferred_candidate_count": deferred_candidate_total,
         "true_positive": true_positive,
         "false_positive_count": len(false_positives),
         "false_negative_count": len(false_negatives),
