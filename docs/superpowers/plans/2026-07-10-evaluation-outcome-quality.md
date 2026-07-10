@@ -466,7 +466,7 @@ git commit -m "增加评估结果状态指标"
 def test_repository_labeled_rules_eval_has_perfect_outcome_accuracy(self):
     path = Path(__file__).resolve().parents[1] / "examples" / "labeled-events.jsonl"
 
-    result = evaluate_labeled_events(path, project=".", mode="rules")
+    result = evaluate_labeled_events(path, project="/tmp/project", mode="rules")
 
     self.assertEqual(result["rows"], 16)
     self.assertEqual(result["precision"], 1.0)
@@ -547,7 +547,7 @@ Run:
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [Console]::OutputEncoding
 $env:PYTHONUTF8 = "1"
-uv run dream-memory eval --input examples/labeled-events.jsonl --project . --mode rules
+uv run dream-memory eval --input examples/labeled-events.jsonl --project /tmp/project --mode rules
 ```
 
 Expected:
@@ -617,7 +617,7 @@ Run:
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [Console]::OutputEncoding
 $env:PYTHONUTF8 = "1"
-uv run dream-memory eval --input examples/labeled-events.jsonl --project . --mode rules
+uv run dream-memory eval --input examples/labeled-events.jsonl --project /tmp/project --mode rules
 ```
 
 Expected: Task 3 Step 5 的全部指标成立。

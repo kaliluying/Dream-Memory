@@ -36,6 +36,7 @@ uv run dream-memory --help
 uv run dream-memory init --output-dir /tmp/dream-memory-workspace
 uv run dream-memory eval \
   --input /tmp/dream-memory-workspace/examples/labeled-events.jsonl \
+  --project /tmp/project \
   --output /tmp/dream-memory-workspace/eval.json
 ```
 
@@ -340,7 +341,7 @@ src/dream_memory/
 ```bash
 uv run dream-memory eval \
   --input examples/labeled-events.jsonl \
-  --project . \
+  --project /tmp/project \
   --mode rules \
   --output .dream-memory/eval.rules.json
 ```
@@ -350,7 +351,7 @@ uv run dream-memory eval \
 ```bash
 uv run dream-memory eval \
   --input examples/labeled-events.jsonl \
-  --project . \
+  --project /tmp/project \
   --mode ai \
   --timeout-seconds 20 \
   --max-attempts 1 \
@@ -360,12 +361,16 @@ uv run dream-memory eval \
 
 当前维护的 `examples/labeled-events.jsonl` 覆盖 16 行评估样本，包含用户偏好、项目事实、产品方向、人工审核门禁、失败教训、一次性任务噪声、内部上下文噪声、重复记忆、rejected option、凭据位置噪声、跨项目隔离，以及单事件、重复事件和双事件普通偏好的证据门禁。自包含初始化会把示例评估项目设为 `/tmp/project`，因此 `dream-memory --config <dir>/config.json eval` 可直接复现基准结果。
 
+评估 JSONL 可选使用 `expected_outcomes` 验证候选状态，允许值为 `reviewable`、`deferred`、`rejected` 和 `none`。报告中的 `outcome_checked_rows`、`outcome_correct_rows`、`outcome_accuracy` 和 `outcome_mismatches` 用于检查状态标注，不替代原有内容匹配指标。
+
+`project_instruction` 和结构化 `project_markers` 属于明确项目指令，单个有效事件即可进入人工审核；普通偏好仍需要两个不同的有效 `event_id`。
+
 如果模型服务不稳定，可显式记录 AI 失败并回退到规则抽取，报告会同时输出 `extraction_success_count`、`extraction_error_count`、`fallback_count` 和 `fallback_empty_count`，避免把规则兜底误读成纯 AI 效果。AI 评估报告中的 `raw_candidate_count` 是单行模型原始候选数，`scored_candidate_count` 是经过 Dream Analysis 后真正计入 precision 的候选数；顶层 `raw_candidate_total` / `fallback_candidate_total` / `scored_candidate_total` 汇总全量原始候选、规则兜底候选和计分候选，`deferred_candidate_count` 记录因独立证据不足而延迟的候选：
 
 ```bash
 uv run dream-memory eval \
   --input examples/labeled-events.jsonl \
-  --project . \
+  --project /tmp/project \
   --mode ai \
   --timeout-seconds 8 \
   --max-attempts 1 \

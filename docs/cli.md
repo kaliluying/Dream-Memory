@@ -17,7 +17,7 @@ uv run dream-memory export --target both --project .
 
 ## 证据门禁与人工审核
 
-普通记忆候选需要两个不同的有效 `event_id` 才会进入 review queue。带 `explicit` 标签的明确长期指令只需要一个有效 `event_id`。证据不足的候选仍保留在 candidate 和 `DREAMS.md` 产物中；后续 `sync` 导入新的独立证据后会重新评估。
+普通记忆候选需要两个不同的有效 `event_id` 才会进入 review queue。带 `explicit` 标签的明确长期指令只需要一个有效 `event_id`；`project_instruction` 和结构化 `project_markers` 提取的项目规则会自动带上该标签。证据不足的候选仍保留在 candidate 和 `DREAMS.md` 产物中；后续 `sync` 导入新的独立证据后会重新评估。
 
 `auto-review` 和 `sync --auto` 不会批准 `create`、`review` 或 `merge`，分数和 `--include-merges` / `--include-review` 都不会绕过人工门禁。它们只兼容处理旧队列中的 `reject` 和 `needs_more_evidence` 决策。
 
@@ -38,6 +38,7 @@ uv run dream-memory extract-facts
 uv run dream-memory init --output-dir /tmp/dream-memory-workspace
 uv run dream-memory eval \
   --input /tmp/dream-memory-workspace/examples/labeled-events.jsonl \
+  --project /tmp/project \
   --output /tmp/dream-memory-workspace/eval.json
 ```
 
@@ -61,7 +62,7 @@ uv run dream-memory context \
 ```bash
 uv run dream-memory eval \
   --input examples/labeled-events.jsonl \
-  --project . \
+  --project /tmp/project \
   --mode rules \
   --output .dream-memory/eval.rules.json
 ```
@@ -71,7 +72,7 @@ uv run dream-memory eval \
 ```bash
 uv run dream-memory eval \
   --input examples/labeled-events.jsonl \
-  --project . \
+  --project /tmp/project \
   --mode ai \
   --timeout-seconds 20 \
   --max-attempts 1 \
@@ -81,10 +82,12 @@ uv run dream-memory eval \
 
 `examples/labeled-events.jsonl` 是维护中的 16 行基准集，覆盖正例、噪声、重复、敏感凭据位置、跨项目隔离、跨项目用户偏好，以及单事件、重复事件和双事件普通偏好的证据门禁。模型服务不稳定时，可以保留 AI 错误并用规则抽取兜底。报告中的 `extraction_success_count`、`extraction_error_count`、`fallback_count` 和 `fallback_empty_count` 用来区分纯 AI 成功与规则兜底成功；`raw_candidate_count` 表示单行模型原始候选数，`scored_candidate_count` 表示经过 Dream Analysis 后真正计入 precision 的候选数；顶层 `raw_candidate_total` / `fallback_candidate_total` / `scored_candidate_total` 汇总全量原始候选、规则兜底候选和计分候选，`deferred_candidate_count` 记录因独立证据不足而延迟的候选：
 
+评估 JSONL 可选使用 `expected_outcomes` 验证候选状态，允许值为 `reviewable`、`deferred`、`rejected` 和 `none`。报告中的 `outcome_checked_rows`、`outcome_correct_rows`、`outcome_accuracy` 和 `outcome_mismatches` 用于检查状态标注，不替代原有内容匹配指标。
+
 ```bash
 uv run dream-memory eval \
   --input examples/labeled-events.jsonl \
-  --project . \
+  --project /tmp/project \
   --mode ai \
   --timeout-seconds 8 \
   --max-attempts 1 \
