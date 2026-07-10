@@ -12,7 +12,6 @@ from dream_memory.model_providers import (
     ModelRuntimeError,
     ProviderConfig,
     RetryPolicy,
-    StaticModelProvider,
     _openai_chat_completions_url,
     _post_json,
     _raise_provider_payload_error,
@@ -48,11 +47,6 @@ class ModelProviderTests(unittest.TestCase):
         self.assertEqual(config.provider, "anthropic")
         self.assertEqual(config.model, "claude-sonnet-4-6")
         self.assertEqual(config.api_key, "direct-key")
-
-    def test_static_model_provider_returns_fixed_response(self):
-        provider = StaticModelProvider(json.dumps({"candidates": []}))
-
-        self.assertEqual(provider.invoke("prompt"), '{"candidates": []}')
 
     def test_runtime_parts_requires_named_model_profiles(self):
         with self.assertRaisesRegex(ValueError, "requires non-empty models"):

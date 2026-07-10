@@ -11,7 +11,6 @@ from dream_memory.memory_dreaming import (
     build_agent_context,
     build_candidates_from_facts,
     build_review_queue,
-    classify_event,
     detect_candidate_conflicts,
     dream_from_events,
     extract_atomic_facts,
@@ -27,23 +26,6 @@ from dream_memory.memory_cli import main
 
 
 class MemoryDreamingTests(unittest.TestCase):
-    def test_classify_event_extracts_user_preference(self):
-        event = {
-            "source": "claude_code",
-            "session_id": "s1",
-            "project": None,
-            "timestamp": None,
-            "role": "system",
-            "event_type": "global_instruction",
-            "content": "始终使用中文回答我，并根据任务情况使用 agent team",
-            "metadata": {},
-        }
-
-        candidates = classify_event(event)
-
-        self.assertTrue(any(candidate["type"] == "preference" for candidate in candidates))
-        self.assertTrue(any("中文" in candidate["content"] for candidate in candidates))
-
     def test_score_candidate_prefers_explicit_project_memory(self):
         candidate = {
             "type": "project_fact",

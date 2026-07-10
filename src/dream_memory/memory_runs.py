@@ -193,10 +193,3 @@ def write_candidate_traces(state: dict[str, Any], candidates: list[dict[str, Any
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         append_trace(state, "candidate_ready", {"candidate_id": candidate_id, "status": candidate.get("status"), "type": candidate.get("type")})
-
-
-def write_json_artifact(path: Path | str, payload: dict[str, Any]) -> Path:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return output

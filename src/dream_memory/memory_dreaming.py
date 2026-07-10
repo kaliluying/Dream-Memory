@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 
 from .memory_models import build_atomic_fact, build_memory_card, build_review_decision, build_review_queue_item
 
@@ -1012,89 +1012,6 @@ def _candidate_id(content: str, scope: str, project: str | None) -> str:
     return "mem_" + hashlib.sha1(raw).hexdigest()[:12]
 
 
-def _base_candidate(
-    *,
-    memory_type: str,
-    scope: str,
-    project: str | None,
-    content: str,
-    event: dict[str, Any],
-    tags: list[str] | None = None,
-) -> dict[str, Any]:
-    return {
-        "id": _candidate_id(content, scope, project),
-        "type": memory_type,
-        "scope": scope,
-        "project": project,
-        "content": content.strip(),
-        "tags": tags or [],
-        "evidence": [
-            {
-                "source": event.get("source"),
-                "session_id": event.get("session_id"),
-                "event_type": event.get("event_type"),
-                "timestamp": event.get("timestamp"),
-            }
-        ],
-    }
-
-
-def classify_event(event: dict[str, Any]) -> list[dict[str, Any]]:
-    content = str(event.get("content") or "").strip()
-    project = event.get("project")
-    event_type = str(event.get("event_type") or "")
-    role = str(event.get("role") or "")
-    if not content or SENSITIVE_RE.search(content):
-        return []
-
-    candidates: list[dict[str, Any]] = []
-    lowered = content.lower()
-
-    if event_type == "global_instruction" or "始终" in content or "偏好" in content or "prefer" in lowered:
-        candidates.append(_base_candidate(
-            memory_type="preference",
-            scope="global",
-            project=None,
-            content=content,
-            event=event,
-            tags=["preference"],
-        ))
-
-    if any(token in content for token in ["使用 uv", "uv 管理", "Python", "Dreams", "Claude Code", "Codex", "runtime", "patch"]):
-        candidates.append(_base_candidate(
-            memory_type="project_fact" if project else "global_fact",
-            scope="project" if project else "global",
-            project=project,
-            content=content,
-            event=event,
-            tags=[tag for tag in ["uv" if "uv" in lowered else "", "python" if "python" in lowered else "", "dreams" if "dream" in lowered else "", "claude-code" if "claude code" in lowered else "", "codex" if "codex" in lowered else "", "patch" if "patch" in lowered else ""] if tag],
-        ))
-
-    if role == "user" and any(word in content for word in ["希望", "想", "需要", "不要", "必须"]):
-        candidates.append(_base_candidate(
-            memory_type="requirement",
-            scope="project" if project else "global",
-            project=project,
-            content=content,
-            event=event,
-            tags=["requirement"],
-        ))
-
-    return candidates
-
-
-def _merge_candidates(candidates: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for candidate in candidates:
-        key = candidate["id"]
-        if key not in merged:
-            merged[key] = candidate
-            continue
-        merged[key]["evidence"].extend(candidate.get("evidence", []))
-        merged[key]["tags"] = sorted(set(merged[key].get("tags", []) + candidate.get("tags", [])))
-    return list(merged.values())
-
-
 def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     content = str(candidate.get("content") or "")
     evidence_count = len(candidate.get("evidence", []))
@@ -1448,22 +1365,6 @@ def analyze_dream_candidate(
             "conflict_promote_action": conflict_action,
         },
     }
-
-
-def suggest_review_action(candidate: dict[str, Any], quality_signals: dict[str, Any], conflicts: list[dict[str, Any]]) -> str:
-    if quality_signals.get("duplicate"):
-        return "reject"
-    if quality_signals.get("one_off_task"):
-        return "reject"
-    if quality_signals.get("evidence_strength", 0) <= 0:
-        return "needs_more_evidence"
-    if conflicts:
-        return "replace" if candidate.get("status") == "promote" and quality_signals.get("evidence_strength", 0) >= 0.5 else "merge"
-    if quality_signals.get("similarity", 0) >= 0.18 and quality_signals.get("matched_memory_id"):
-        return "merge"
-    if candidate.get("status") == "reject":
-        return "reject"
-    return "create"
 
 
 def _signals_with_conflict_match(candidate: dict[str, Any], quality_signals: dict[str, Any], conflicts: list[dict[str, Any]]) -> dict[str, Any]:

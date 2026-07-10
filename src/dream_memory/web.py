@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from .memory_cli import _auto_review_run, _resume_run, _run_dream_to_review
 from .memory_config import load_memory_config, normalize_memory_config
-from .memory_dreaming import normalize_review_decision
+from .memory_dreaming import load_events_jsonl, normalize_review_decision
 from .memory_runs import append_trace, create_run_state, list_runs, load_run_state, read_trace, update_run_state
 from .model_providers import ModelProviderError, ProviderConfig, list_provider_models, runtime_parts_from_config
 
@@ -238,8 +238,8 @@ def _review_progress(state: dict[str, Any]) -> dict[str, Any]:
     artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
     queue_path = Path(str(artifacts.get("review_queue_path") or ""))
     candidates_path = Path(str(artifacts.get("candidates_path") or ""))
-    queue_items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
-    candidates = _read_jsonl_dicts(candidates_path) if candidates_path.is_file() else []
+    queue_items = load_events_jsonl(queue_path) if queue_path.is_file() else []
+    candidates = load_events_jsonl(candidates_path) if candidates_path.is_file() else []
     source_items = queue_items or candidates
     source = "review_queue" if queue_items else "candidates"
     candidate_ids: list[str] = []
@@ -256,7 +256,7 @@ def _review_progress(state: dict[str, Any]) -> dict[str, Any]:
         status = str(item.get("status") or candidate.get("status") or "unknown")
         statuses[status] = statuses.get(status, 0) + 1
     reviewed_path = Path(str(state["run_dir"])) / "reviewed.jsonl"
-    reviewed = _read_jsonl_dicts(reviewed_path)
+    reviewed = load_events_jsonl(reviewed_path) if reviewed_path.is_file() else []
     reviewed_ids = {str(row.get("candidate_id")) for row in reviewed if row.get("candidate_id")}
     actions: dict[str, int] = {}
     for row in reviewed:
@@ -274,24 +274,6 @@ def _review_progress(state: dict[str, Any]) -> dict[str, Any]:
         "suggested_actions": dict(sorted(suggested_actions.items())),
         "statuses": dict(sorted(statuses.items())),
     }
-
-
-def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                rows.append(payload)
-    return rows
 
 
 def _review_queue_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -478,7 +460,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
-        items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        items = load_events_jsonl(queue_path) if queue_path.is_file() else []
         return {"run_id": run_id, "count": len(items), "items": items}
 
     @app.get("/api/memory/runs/{run_id}/review-summary")
@@ -488,7 +470,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
-        items = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        items = load_events_jsonl(queue_path) if queue_path.is_file() else []
         return {"run_id": run_id, "summary": _review_queue_summary(items)}
 
     @app.get("/api/memory/runs/{run_id}/review-progress")
@@ -506,7 +488,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         candidates_path = Path(str(state.get("artifacts", {}).get("candidates_path") or ""))
-        candidates = _read_jsonl_dicts(candidates_path) if candidates_path.is_file() else []
+        candidates = load_events_jsonl(candidates_path) if candidates_path.is_file() else []
         return {"run_id": run_id, "count": len(candidates), "candidates": candidates}
 
     @app.post("/api/memory/runs/{run_id}/review")
@@ -549,7 +531,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
-        queue = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        queue = load_events_jsonl(queue_path) if queue_path.is_file() else []
         payload["preview"] = _auto_review_preview_from_queue(queue, payload, request)
         return payload
 
@@ -565,7 +547,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         queue_path = Path(str(state.get("artifacts", {}).get("review_queue_path") or ""))
-        queue = _read_jsonl_dicts(queue_path) if queue_path.is_file() else []
+        queue = load_events_jsonl(queue_path) if queue_path.is_file() else []
         payload["preview"] = _auto_review_preview_from_queue(queue, payload, request)
         return payload
 
@@ -583,7 +565,7 @@ def create_app(default_output_dir: Path | str = "outputs/runs", default_memory_d
         candidates_path = memory_dir / "ai-candidates.jsonl"
         if not candidates_path.exists():
             candidates_path = memory_dir / "candidates.jsonl"
-        candidates = _read_jsonl_dicts(candidates_path)
+        candidates = load_events_jsonl(candidates_path) if candidates_path.is_file() else []
         return {
             "memory_dir": str(memory_dir),
             "candidates_path": str(candidates_path),

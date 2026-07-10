@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
 
 from .memory_dreaming import (
+    SENSITIVE_RE,
+    _candidate_id as _stable_candidate_id,
     build_candidates_from_facts,
+    normalize_memory_text as _normalize_text,
     normalize_project_path,
     _is_code_or_listing_dump_content,
     _is_low_value_event_content,
@@ -16,13 +18,7 @@ from .memory_dreaming import (
 )
 from .model_providers import invoke_model as invoke_model_provider, invoke_model_runtime
 
-
-
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<json>\{.*?\})\s*```", re.DOTALL)
-SENSITIVE_RE = re.compile(
-    r"(sk-[a-zA-Z0-9]|api[_-]?key\s*[=:]|access[_-]?token\s*[=:]|refresh[_-]?token\s*[=:]|password\s*[=:]|secret\s*[=:]|cookie\s*[=:]|bearer\s+[a-zA-Z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)",
-    re.I,
-)
 ALLOWED_MEMORY_TYPES = {"preference", "project_fact", "decision", "workflow", "pitfall", "requirement", "rejected_option", "product_direction", "global_fact"}
 ALLOWED_SCOPES = {"user", "global", "project", "session"}
 ALLOWED_DECISIONS = {"promote", "review", "reject"}
@@ -171,17 +167,6 @@ def extract_json_payload(text: str) -> dict[str, Any]:
     if not isinstance(payload.get("candidates"), list):
         payload["candidates"] = []
     return payload
-
-
-def _stable_candidate_id(content: str, scope: str, project: str | None) -> str:
-    raw = f"{scope}|{project or ''}|{content}".encode("utf-8")
-    return "mem_" + hashlib.sha1(raw).hexdigest()[:12]
-
-
-def _normalize_text(value: str) -> str:
-    text = re.sub(r"\s+", " ", str(value).strip().lower())
-    text = re.sub(r"[。．.!！?？,，;；:：]+$", "", text)
-    return text.strip()
 
 
 def _coerce_confidence(value: Any) -> float:

@@ -156,18 +156,6 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
         ],
     },
 }
-
-
-class StaticModelProvider:
-    """Simple test provider returning a fixed response."""
-
-    def __init__(self, response: str) -> None:
-        self.response = response
-
-    def invoke(self, prompt: str) -> str:
-        return self.response
-
-
 class AnthropicProvider:
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config

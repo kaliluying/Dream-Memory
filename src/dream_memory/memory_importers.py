@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .memory_dreaming import load_events_jsonl
+
 SENSITIVE_KEY_RE = re.compile(r"(token|key|secret|password|cookie|auth|credential)", re.I)
 
 
@@ -37,24 +39,6 @@ def redact_sensitive(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
     return value
-
-
-def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict):
-                rows.append(obj)
-    return rows
 
 
 def _content_parts(value: Any) -> list[str]:
@@ -360,7 +344,7 @@ class CodexImporter:
 
     def import_events(self) -> list[NormalizedSessionEvent]:
         events: list[NormalizedSessionEvent] = []
-        for row in _read_jsonl(self.history_path):
+        for row in (load_events_jsonl(self.history_path) if self.history_path.exists() else []):
             content = _message_content(row)
             if not content:
                 continue
@@ -391,7 +375,7 @@ class CodexImporter:
                     metadata=redact_sensitive({"title": thread.get("title"), "model": thread.get("model"), "rollout_path": str(rollout_path) if str(rollout_path) else None}),
                 ))
             if rollout_path.exists():
-                for row in _read_jsonl(rollout_path):
+                for row in load_events_jsonl(rollout_path):
                     rollout_message = _rollout_message(row)
                     if rollout_message is not None:
                         role, content, event_type = rollout_message
@@ -475,7 +459,7 @@ class ClaudeCodeImporter:
     def _import_transcript_events(self) -> list[NormalizedSessionEvent]:
         events: list[NormalizedSessionEvent] = []
         for path in self._transcript_paths():
-            for row in _read_jsonl(path):
+            for row in load_events_jsonl(path):
                 row_type = str(row.get("type") or "")
                 if row_type not in {"user", "assistant"}:
                     continue
