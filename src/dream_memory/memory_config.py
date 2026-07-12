@@ -96,13 +96,19 @@ def normalize_memory_config(config: dict[str, Any]) -> dict[str, Any]:
     for name, value in loaded_models.items():
         if not isinstance(value, dict):
             raise ValueError(f"Model profile must be an object: {name}")
+        try:
+            timeout_seconds = int(value.get("timeout_seconds", 60))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Model profile timeout_seconds must be a positive integer: {name}") from exc
+        if timeout_seconds < 1:
+            raise ValueError(f"Model profile timeout_seconds must be a positive integer: {name}")
         profile = {
             "provider": value.get("provider"),
             "model": value.get("model"),
             "api_key": value.get("api_key"),
             "api_key_env": value.get("api_key_env"),
             "base_url": value.get("base_url"),
-            "timeout_seconds": value.get("timeout_seconds", 60),
+            "timeout_seconds": timeout_seconds,
         }
         if not profile["provider"] or not profile["model"]:
             raise ValueError(f"Model profile requires provider and model: {name}")
@@ -133,6 +139,7 @@ def normalize_memory_config(config: dict[str, Any]) -> dict[str, Any]:
         for key, value in retry.items():
             if key in merged_retry:
                 merged_retry[key] = value
+        _validate_retry_policy(merged_retry)
         policy["retry"] = merged_retry
     if "allow_rules_fallback" in loaded_policy:
         policy["allow_rules_fallback"] = bool(loaded_policy["allow_rules_fallback"])
@@ -140,6 +147,28 @@ def normalize_memory_config(config: dict[str, Any]) -> dict[str, Any]:
         policy["fallback_chain"] = [policy["default_profile"], *policy["fallback_chain"]]
     normalized["model_policy"] = policy
     return normalized
+
+
+def _validate_retry_policy(retry: dict[str, Any]) -> None:
+    try:
+        max_attempts = int(retry.get("max_attempts", DEFAULT_RETRY_POLICY["max_attempts"]))
+        initial_delay = float(retry.get("initial_delay_seconds", DEFAULT_RETRY_POLICY["initial_delay_seconds"]))
+        backoff_factor = float(retry.get("backoff_factor", DEFAULT_RETRY_POLICY["backoff_factor"]))
+        max_delay = float(retry.get("max_delay_seconds", DEFAULT_RETRY_POLICY["max_delay_seconds"]))
+        retry_on_status = retry.get("retry_on_status", DEFAULT_RETRY_POLICY["retry_on_status"])
+        statuses = [int(status) for status in retry_on_status]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("model_policy.retry contains invalid numeric values") from exc
+    if max_attempts < 1:
+        raise ValueError("model_policy.retry.max_attempts must be at least 1")
+    if initial_delay < 0:
+        raise ValueError("model_policy.retry.initial_delay_seconds must be non-negative")
+    if backoff_factor < 1:
+        raise ValueError("model_policy.retry.backoff_factor must be at least 1")
+    if max_delay < 0:
+        raise ValueError("model_policy.retry.max_delay_seconds must be non-negative")
+    if not statuses:
+        raise ValueError("model_policy.retry.retry_on_status must not be empty")
 
 
 def load_memory_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -163,6 +192,17 @@ def load_memory_config(path: Path | str | None = None) -> dict[str, Any]:
 
 def write_default_memory_config(path: Path | str = DEFAULT_CONFIG_PATH) -> Path:
     output = Path(path).expanduser()
+    if output.exists() and not output.is_file():
+        raise FileExistsError(f"config path is not writable: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(normalize_memory_config(DEFAULT_MEMORY_CONFIG), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = output.with_name(f".{output.name}.tmp")
+    try:
+        tmp.write_text(json.dumps(normalize_memory_config(DEFAULT_MEMORY_CONFIG), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(output)
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise FileExistsError(f"config path is not writable: {output}") from exc
     return output

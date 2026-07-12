@@ -9,6 +9,7 @@ from dream_memory.memory_importers import (
     CodexImporter,
     NormalizedSessionEvent,
     redact_sensitive,
+    redact_sensitive_text,
     import_project_instruction_events,
     import_project_marker_events,
     write_events_jsonl,
@@ -19,8 +20,9 @@ class MemoryImporterTests(unittest.TestCase):
     def test_redact_sensitive_nested_values(self):
         data = {
             "api_key": "secret",
-            "nested": {"token": "abc", "safe": "ok"},
+            "nested": {"token": "abc", "safe": "ok", "title": "failed with Bearer abc123"},
             "items": [{"password": "pw", "text": "hello"}],
+            "url": "https://user:pass123@example.test/v1?api_key=sk-test-secret&safe=1",
         }
 
         redacted = redact_sensitive(data)
@@ -28,7 +30,115 @@ class MemoryImporterTests(unittest.TestCase):
         self.assertEqual(redacted["api_key"], "<redacted>")
         self.assertEqual(redacted["nested"]["token"], "<redacted>")
         self.assertEqual(redacted["nested"]["safe"], "ok")
+        self.assertEqual(redacted["nested"]["title"], "failed with <redacted>")
         self.assertEqual(redacted["items"][0]["password"], "<redacted>")
+        self.assertNotIn("pass123", redacted["url"])
+        self.assertNotIn("sk-test-secret", redacted["url"])
+        self.assertIn("<redacted>", redacted["url"])
+
+    def test_redact_sensitive_text_redacts_url_credentials_and_sensitive_query(self):
+        text = redact_sensitive_text(
+            "failed at https://user:pass123@example.test/v1?api_key=sk-test-secret&safe=1"
+        )
+
+        self.assertNotIn("pass123", text)
+        self.assertNotIn("sk-test-secret", text)
+        self.assertIn("https://<redacted>@example.test/v1?api_key=%3Credacted%3E&safe=1", text)
+
+    def test_redact_sensitive_text_redacts_credential_location_statements(self):
+        text = redact_sensitive_text("项目的 API key 在 key.txt 文件中。")
+
+        self.assertNotIn("API key", text)
+        self.assertNotIn("key.txt", text)
+        self.assertIn("<redacted>", text)
+
+    def test_redact_sensitive_redacts_sensitive_dictionary_keys(self):
+        redacted = redact_sensitive({
+            "safe": 1,
+            "api_key=sk-test-secret": 2,
+            "nested": {"项目的 API key 在 key.txt 文件中。": 3},
+        })
+
+        serialized = json.dumps(redacted, ensure_ascii=False)
+        self.assertIn('"safe": 1', serialized)
+        self.assertNotIn("sk-test-secret", serialized)
+        self.assertNotIn("API key", serialized)
+        self.assertNotIn("key.txt", serialized)
+        self.assertIn("<redacted>", serialized)
+
+    def test_codex_import_redacts_secret_values_from_event_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            codex = Path(tmp) / ".codex"
+            codex.mkdir()
+            (codex / "history.jsonl").write_text(
+                json.dumps({"session_id": "s1", "ts": 1, "text": "OPENAI_API_KEY=sk-test-secret Bearer abc123"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            events = CodexImporter(codex_home=codex).import_events()
+
+            serialized = "\n".join(event.content for event in events)
+            self.assertNotIn("sk-test-secret", serialized)
+            self.assertNotIn("Bearer abc123", serialized)
+            self.assertIn("<redacted>", serialized)
+
+    def test_codex_import_reports_malformed_jsonl_lines_without_dropping_valid_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            codex = Path(tmp) / ".codex"
+            codex.mkdir()
+            (codex / "history.jsonl").write_text(
+                json.dumps({"session_id": "s1", "ts": 1, "text": "用户偏好中文回答。"}, ensure_ascii=False)
+                + "\nnot-json\n[]\n",
+                encoding="utf-8",
+            )
+            importer = CodexImporter(codex_home=codex)
+
+            events = importer.import_events()
+
+            self.assertEqual([event.content for event in events], ["用户偏好中文回答。"])
+            self.assertEqual(len(importer.import_warnings), 2)
+            self.assertEqual(importer.import_warnings[0]["line"], 2)
+            self.assertIn("invalid JSON", importer.import_warnings[0]["error"])
+            self.assertEqual(importer.import_warnings[1]["line"], 3)
+            self.assertIn("expected JSON object", importer.import_warnings[1]["error"])
+
+    def test_claude_import_redacts_secret_values_from_transcript_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_home = Path(tmp) / ".claude"
+            transcripts = claude_home / "transcripts"
+            transcripts.mkdir(parents=True)
+            (transcripts / "session.jsonl").write_text(
+                json.dumps({"type": "user", "timestamp": "2026", "content": "token=raw-token password=raw-password"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            events = ClaudeCodeImporter(claude_home=claude_home, global_state_path=Path(tmp) / ".claude.json").import_events()
+
+            serialized = "\n".join(event.content for event in events)
+            self.assertNotIn("raw-token", serialized)
+            self.assertNotIn("raw-password", serialized)
+            self.assertIn("<redacted>", serialized)
+
+    def test_claude_import_reports_malformed_transcript_lines_without_dropping_valid_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_home = Path(tmp) / ".claude"
+            transcripts = claude_home / "transcripts"
+            transcripts.mkdir(parents=True)
+            (transcripts / "session.jsonl").write_text(
+                json.dumps({"type": "user", "timestamp": "2026", "content": "始终中文回答"}, ensure_ascii=False)
+                + "\nnot-json\n[]\n",
+                encoding="utf-8",
+            )
+            importer = ClaudeCodeImporter(claude_home=claude_home, global_state_path=Path(tmp) / ".claude.json")
+
+            events = importer.import_events()
+
+            self.assertEqual([event.content for event in events], ["始终中文回答"])
+            self.assertEqual(len(importer.import_warnings), 2)
+            self.assertEqual(importer.import_warnings[0]["line"], 2)
+            self.assertIn("invalid JSON", importer.import_warnings[0]["error"])
+            self.assertEqual(importer.import_warnings[1]["line"], 3)
+            self.assertIn("expected JSON object", importer.import_warnings[1]["error"])
 
     def test_codex_scan_detects_core_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,6 +160,40 @@ class MemoryImporterTests(unittest.TestCase):
             self.assertTrue(scan["session_index_found"])
             self.assertTrue(scan["state_db_found"])
             self.assertEqual(scan["thread_count"], 1)
+
+    def test_codex_import_skips_empty_rollout_path_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            codex = Path(tmp) / ".codex"
+            sqlite_dir = codex / "sqlite"
+            sqlite_dir.mkdir(parents=True)
+            con = sqlite3.connect(sqlite_dir / "state_5.sqlite")
+            con.execute("create table threads (id text, rollout_path text, cwd text, title text, first_user_message text, updated_at integer, model text)")
+            con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?)", ("s1", "", "/tmp/project", "空 rollout", "你好", 1, "gpt"))
+            con.commit()
+            con.close()
+
+            events = CodexImporter(codex_home=codex).import_events()
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].event_type, "thread_first_user_message")
+            self.assertEqual(events[0].content, "你好")
+
+    def test_claude_scan_reports_malformed_global_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            claude_home = home / ".claude"
+            claude_home.mkdir()
+            global_state = home / ".claude.json"
+            global_state.write_text("not-json", encoding="utf-8")
+            importer = ClaudeCodeImporter(claude_home=claude_home, global_state_path=global_state)
+
+            scan = importer.scan()
+
+            self.assertEqual(scan["global_project_count"], 0)
+            self.assertEqual(len(scan["warnings"]), 1)
+            self.assertEqual(scan["warnings"][0]["path"], str(global_state))
+            self.assertIn("invalid JSON", scan["warnings"][0]["error"])
+            self.assertEqual(importer.import_warnings, scan["warnings"])
 
 
     def test_codex_import_preserves_project_agents_instructions_without_environment_context(self):
@@ -306,6 +450,30 @@ class MemoryImporterTests(unittest.TestCase):
             self.assertTrue(any(event.role == "system" and "始终中文回答" in event.content for event in events))
             self.assertTrue(any(event.event_type == "project_settings" for event in events))
             self.assertFalse(any("customApiKeyResponses" in json.dumps(event.metadata) for event in events))
+
+    def test_claude_import_reports_malformed_global_and_project_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            claude_home = home / ".claude"
+            claude_home.mkdir()
+            (claude_home / "CLAUDE.md").write_text("始终中文回答", encoding="utf-8")
+            global_state = home / ".claude.json"
+            global_state.write_text("not-json", encoding="utf-8")
+            project = home / "project"
+            project_settings = project / ".claude" / "settings.local.json"
+            project_settings.parent.mkdir(parents=True)
+            project_settings.write_text("not-json", encoding="utf-8")
+            importer = ClaudeCodeImporter(claude_home=claude_home, global_state_path=global_state, project_roots=[project])
+
+            events = importer.import_events()
+
+            self.assertTrue(any(event.event_type == "global_instruction" for event in events))
+            settings_events = [event for event in events if event.event_type == "project_settings"]
+            self.assertEqual(len(settings_events), 1)
+            self.assertEqual(settings_events[0].metadata["path"], str(project_settings))
+            self.assertEqual(len(importer.import_warnings), 2)
+            self.assertEqual({warning["path"] for warning in importer.import_warnings}, {str(global_state), str(project_settings)})
+            self.assertTrue(all("invalid JSON" in warning["error"] for warning in importer.import_warnings))
 
     def test_write_events_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -96,6 +96,48 @@ class MemoryConfigTests(unittest.TestCase):
             self.assertTrue(config["model_policy"]["retry"]["switch_model_on_retry"])
             self.assertEqual(config["model_policy"]["retry"]["retry_on_status"], [429, 500, 502, 503, 504])
 
+    def test_load_memory_config_rejects_invalid_retry_policy_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({
+                "models": {
+                    "primary": {
+                        "provider": "openai",
+                        "model": "gpt-4.1",
+                    }
+                },
+                "model_policy": {
+                    "default_profile": "primary",
+                    "fallback_chain": ["primary"],
+                    "retry": {
+                        "max_attempts": 0,
+                        "initial_delay_seconds": -1,
+                        "backoff_factor": 0,
+                        "max_delay_seconds": -5,
+                    },
+                },
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "retry"):
+                load_memory_config(path)
+
+    def test_load_memory_config_rejects_non_positive_model_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({
+                "models": {
+                    "primary": {
+                        "provider": "openai",
+                        "model": "gpt-4.1",
+                        "timeout_seconds": 0,
+                    }
+                },
+                "model_policy": {"default_profile": "primary", "fallback_chain": ["primary"]},
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "timeout_seconds"):
+                load_memory_config(path)
+
     def test_write_default_memory_config_creates_editable_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_default_memory_config(Path(tmp) / "config.json")
@@ -105,6 +147,34 @@ class MemoryConfigTests(unittest.TestCase):
             self.assertIn("api_key", payload["models"]["primary"])
             self.assertEqual(payload["model_policy"]["fallback_chain"], ["primary"])
             self.assertIn("output_dir", payload)
+
+    def test_write_default_memory_config_rejects_unwritable_path_without_tmp_leftover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.mkdir()
+
+            with self.assertRaisesRegex(FileExistsError, "config path is not writable"):
+                write_default_memory_config(path)
+
+            self.assertTrue(path.is_dir())
+            self.assertFalse((Path(tmp) / ".config.json.tmp").exists())
+
+    def test_packaged_model_config_examples_load_with_current_schema(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        paths = [
+            repo_root / "examples" / "config.openai.json",
+            repo_root / "examples" / "config.anthropic.json",
+            repo_root / "src" / "dream_memory" / "examples" / "config.openai.json",
+            repo_root / "src" / "dream_memory" / "examples" / "config.anthropic.json",
+        ]
+
+        for path in paths:
+            with self.subTest(path=str(path.relative_to(repo_root))):
+                config = load_memory_config(path)
+
+                self.assertIn("models", config)
+                self.assertIn("model_policy", config)
+                self.assertIn(config["model_policy"]["default_profile"], config["models"])
 
 
 if __name__ == "__main__":

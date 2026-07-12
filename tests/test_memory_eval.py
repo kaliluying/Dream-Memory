@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -37,6 +38,14 @@ class MemoryEvalTests(unittest.TestCase):
         self.assertFalse(_matches_expected(
             {"content": "用户偏好不要生成总结文档。", "type": "preference", "scope": "user"},
             {"content": "用户偏好中文回答", "type": "preference", "scope": "user"},
+        ))
+
+    def test_eval_matching_requires_expected_project_match(self):
+        from dream_memory.memory_eval import _matches_expected
+
+        self.assertFalse(_matches_expected(
+            {"content": "项目使用 uv 管理 Python 后端。", "type": "workflow", "scope": "project", "project": "/tmp/other"},
+            {"content": "项目使用 uv 管理 Python 后端。", "type": "workflow", "scope": "project", "project": "/tmp/current"},
         ))
 
     def test_evaluate_labeled_events_can_continue_after_ai_error(self):
@@ -107,12 +116,16 @@ class MemoryEvalTests(unittest.TestCase):
             with patch("dream_memory.memory_eval._extract_candidates") as extract:
                 extract.side_effect = [
                     ([{"content": "用户偏好中文回答。", "type": "preference", "scope": "user"}], {"candidate_count": 1}),
-                    RuntimeError("boom"),
+                    RuntimeError("boom api_key=sk-test-secret Bearer abc123"),
                 ]
                 result = evaluate_labeled_events(path, project=None, mode="ai", continue_on_error=True)
 
             self.assertEqual(result["extractions"][0]["row"], 1)
             self.assertEqual(result["extraction_errors"][0]["row"], 2)
+            self.assertIn("boom", result["extraction_errors"][0]["error"])
+            self.assertNotIn("sk-test-secret", result["extraction_errors"][0]["error"])
+            self.assertNotIn("Bearer abc123", result["extraction_errors"][0]["error"])
+            self.assertIn("<redacted>", result["extraction_errors"][0]["error"])
             self.assertEqual(result["true_positive"], 1)
             self.assertEqual(result["false_negative_count"], 1)
 
@@ -356,6 +369,75 @@ class MemoryEvalTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(output.exists())
             self.assertIn("f1", json.loads(output.read_text(encoding="utf-8")))
+
+    def test_eval_cli_rejects_unwritable_output_without_traceback_or_tmp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            output = Path(tmp) / "eval.json"
+            path.write_text(json.dumps({
+                "event": {"event_id": "event_1", "source": "codex", "role": "user", "event_type": "history_prompt", "content": "用户偏好中文回答。"},
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            output.mkdir()
+
+            with patch("sys.stderr", new_callable=lambda: io.StringIO()) as stderr:
+                exit_code = main(["eval", "--input", str(path), "--output", str(output)])
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("eval output path is not writable", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+            self.assertTrue(output.is_dir())
+            self.assertFalse((Path(tmp) / ".eval.json.tmp").exists())
+
+    def test_eval_cli_redacts_sensitive_report_file_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            output_path = Path(tmp) / "eval.json"
+            path.write_text(json.dumps({
+                "id": "legacy_sensitive_row",
+                "event": {
+                    "event_id": "event_1",
+                    "source": "codex",
+                    "role": "user",
+                    "event_type": "history_prompt",
+                    "content": "项目的 API key 在 key.txt 文件中，OPENAI_API_KEY=sk-test-secret。",
+                },
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            exit_code = main(["eval", "--input", str(path), "--output", str(output_path)])
+
+            output = output_path.read_text(encoding="utf-8")
+            self.assertEqual(exit_code, 0)
+            self.assertIn("<redacted>", output)
+            self.assertNotIn("sk-test-secret", output)
+            self.assertNotIn("API key", output)
+            self.assertNotIn("key.txt", output)
+
+    def test_eval_cli_redacts_sensitive_inline_report_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labeled.jsonl"
+            path.write_text(json.dumps({
+                "id": "legacy_sensitive_row",
+                "event": {
+                    "event_id": "event_1",
+                    "source": "codex",
+                    "role": "user",
+                    "event_type": "history_prompt",
+                    "content": "项目的 API key 在 key.txt 文件中，OPENAI_API_KEY=sk-test-secret。",
+                },
+                "expected": [{"content": "用户偏好中文回答", "type": "preference", "scope": "user"}],
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as stdout:
+                exit_code = main(["eval", "--input", str(path)])
+
+            output = stdout.getvalue()
+            self.assertEqual(exit_code, 0)
+            self.assertIn("<redacted>", output)
+            self.assertNotIn("sk-test-secret", output)
+            self.assertNotIn("API key", output)
+            self.assertNotIn("key.txt", output)
 
 
 if __name__ == "__main__":

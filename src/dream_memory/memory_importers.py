@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import urllib.parse
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,6 +11,47 @@ from typing import Any, Iterable
 from .memory_dreaming import load_events_jsonl
 
 SENSITIVE_KEY_RE = re.compile(r"(token|key|secret|password|cookie|auth|credential)", re.I)
+SENSITIVE_VALUE_PATTERNS = [
+    re.compile(r"(?i)\b[A-Z0-9_-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|cookie)\s*[=:]\s*[^,\s;]+"),
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\bsk-[A-Za-z0-9._-]+"),
+    re.compile(r"\bsk_[A-Za-z0-9._-]+"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    re.compile(r"(?i)(密钥|key|token|api[_-]?key).{0,12}(在|文件|path|路径).{0,24}(\.txt|\.env|json|yaml|yml|配置)"),
+]
+URL_PATTERN = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+")
+
+
+def _redact_url_credentials(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return value
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    hostname = parsed.hostname or ""
+    netloc = hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return value
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    if parsed.username or parsed.password:
+        netloc = f"<redacted>@{netloc}"
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    redacted_query = [
+        (key, "<redacted>" if SENSITIVE_KEY_RE.search(key) else item)
+        for key, item in query
+    ]
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        urllib.parse.urlencode(redacted_query, doseq=True),
+        parsed.fragment,
+    ))
 
 
 @dataclass(frozen=True)
@@ -31,14 +73,72 @@ def redact_sensitive(value: Any) -> Any:
     if isinstance(value, dict):
         output: dict[str, Any] = {}
         for key, item in value.items():
-            if SENSITIVE_KEY_RE.search(str(key)):
-                output[key] = "<redacted>"
+            redacted_key = redact_sensitive_text(str(key))
+            if redacted_key != str(key) or SENSITIVE_KEY_RE.search(str(key)):
+                output[redacted_key] = "<redacted>"
             else:
-                output[key] = redact_sensitive(item)
+                output[redacted_key] = redact_sensitive(item)
         return output
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
     return value
+
+
+def _redact_sensitive_plain_text(value: str) -> str:
+    text = str(value or "")
+    for pattern in SENSITIVE_VALUE_PATTERNS:
+        text = pattern.sub("<redacted>", text)
+    return text
+
+
+def redact_sensitive_text(value: str) -> str:
+    text = str(value or "")
+    parts: list[str] = []
+    offset = 0
+    for match in URL_PATTERN.finditer(text):
+        parts.append(_redact_sensitive_plain_text(text[offset:match.start()]))
+        parts.append(_redact_url_credentials(match.group(0)))
+        offset = match.end()
+    parts.append(_redact_sensitive_plain_text(text[offset:]))
+    return "".join(parts)
+
+
+def _read_jsonl(path: Path, *, warnings: list[dict[str, Any]] | None = None) -> Iterable[dict[str, Any]]:
+    if not path.exists() or not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if warnings is not None:
+                    warnings.append({"path": str(path), "line": line_number, "error": f"invalid JSON: {exc.msg}"})
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+            elif warnings is not None:
+                warnings.append({"path": str(path), "line": line_number, "error": "expected JSON object"})
+    return rows
+
+
+def _read_json_object(path: Path, *, warnings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError as exc:
+        if warnings is not None:
+            warnings.append({"path": str(path), "error": f"invalid JSON: {exc.msg}"})
+        return {}
+    if not isinstance(obj, dict):
+        if warnings is not None:
+            warnings.append({"path": str(path), "error": "expected JSON object"})
+        return {}
+    return obj
 
 
 def _content_parts(value: Any) -> list[str]:
@@ -283,6 +383,7 @@ def write_events_jsonl(events: Iterable[NormalizedSessionEvent], path: Path | st
 class CodexImporter:
     def __init__(self, codex_home: Path | str | None = None):
         self.codex_home = Path(codex_home or Path.home() / ".codex").expanduser()
+        self.import_warnings: list[dict[str, Any]] = []
 
     @property
     def history_path(self) -> Path:
@@ -343,8 +444,9 @@ class CodexImporter:
                 con.close()
 
     def import_events(self) -> list[NormalizedSessionEvent]:
+        self.import_warnings = []
         events: list[NormalizedSessionEvent] = []
-        for row in (load_events_jsonl(self.history_path) if self.history_path.exists() else []):
+        for row in _read_jsonl(self.history_path, warnings=self.import_warnings):
             content = _message_content(row)
             if not content:
                 continue
@@ -354,13 +456,14 @@ class CodexImporter:
                 project=None,
                 timestamp=str(row.get("ts")) if row.get("ts") is not None else None,
                 role="user",
-                content=content,
+                content=redact_sensitive_text(content),
                 event_type="history_prompt",
                 metadata=redact_sensitive({"path": str(self.history_path)}),
             ))
 
         for thread in self._thread_rows():
-            rollout_path = Path(thread.get("rollout_path") or "")
+            raw_rollout_path = str(thread.get("rollout_path") or "").strip()
+            rollout_path = Path(raw_rollout_path) if raw_rollout_path else None
             session_id = str(thread.get("id") or "")
             project = thread.get("cwd")
             if thread.get("first_user_message"):
@@ -370,12 +473,12 @@ class CodexImporter:
                     project=project,
                     timestamp=str(thread.get("updated_at")) if thread.get("updated_at") is not None else None,
                     role="user",
-                    content=str(thread["first_user_message"]),
+                    content=redact_sensitive_text(str(thread["first_user_message"])),
                     event_type="thread_first_user_message",
-                    metadata=redact_sensitive({"title": thread.get("title"), "model": thread.get("model"), "rollout_path": str(rollout_path) if str(rollout_path) else None}),
+                    metadata=redact_sensitive({"title": thread.get("title"), "model": thread.get("model"), "rollout_path": str(rollout_path) if rollout_path is not None else None}),
                 ))
-            if rollout_path.exists():
-                for row in load_events_jsonl(rollout_path):
+            if rollout_path is not None and rollout_path.exists():
+                for row in _read_jsonl(rollout_path, warnings=self.import_warnings):
                     rollout_message = _rollout_message(row)
                     if rollout_message is not None:
                         role, content, event_type = rollout_message
@@ -391,7 +494,7 @@ class CodexImporter:
                         project=project,
                         timestamp=str(row.get("timestamp") or row.get("ts") or thread.get("updated_at")),
                         role=role,
-                        content=content,
+                        content=redact_sensitive_text(content),
                         event_type=event_type,
                         metadata=redact_sensitive({"rollout_path": str(rollout_path), "thread_title": thread.get("title")}),
                     ))
@@ -408,6 +511,7 @@ class ClaudeCodeImporter:
         self.claude_home = Path(claude_home or Path.home() / ".claude").expanduser()
         self.global_state_path = Path(global_state_path or Path.home() / ".claude.json").expanduser()
         self.project_roots = [Path(path).expanduser() for path in (project_roots or [])]
+        self.import_warnings: list[dict[str, Any]] = []
 
     @property
     def transcripts_dir(self) -> Path:
@@ -433,14 +537,12 @@ class ClaudeCodeImporter:
         return unique
 
     def scan(self) -> dict[str, Any]:
+        self.import_warnings = []
         global_projects = 0
         if self.global_state_path.exists():
-            try:
-                obj = json.loads(self.global_state_path.read_text(encoding="utf-8", errors="ignore"))
-                if isinstance(obj.get("projects"), dict):
-                    global_projects = len(obj["projects"])
-            except Exception:
-                pass
+            obj = _read_json_object(self.global_state_path, warnings=self.import_warnings)
+            if isinstance(obj.get("projects"), dict):
+                global_projects = len(obj["projects"])
         file_history = self.claude_home / "file-history"
         transcript_paths = self._transcript_paths()
         return {
@@ -454,12 +556,13 @@ class ClaudeCodeImporter:
             "project_settings_found": [str(root / ".claude" / "settings.local.json") for root in self.project_roots if (root / ".claude" / "settings.local.json").exists()],
             "transcripts_found": bool(transcript_paths),
             "transcript_count": len(transcript_paths),
+            "warnings": list(self.import_warnings),
         }
 
     def _import_transcript_events(self) -> list[NormalizedSessionEvent]:
         events: list[NormalizedSessionEvent] = []
         for path in self._transcript_paths():
-            for row in load_events_jsonl(path):
+            for row in _read_jsonl(path, warnings=self.import_warnings):
                 row_type = str(row.get("type") or "")
                 if row_type not in {"user", "assistant"}:
                     continue
@@ -478,13 +581,14 @@ class ClaudeCodeImporter:
                     project=str(project) if project else None,
                     timestamp=str(row.get("timestamp")) if row.get("timestamp") is not None else None,
                     role=role,
-                    content=content,
+                    content=redact_sensitive_text(content),
                     event_type="transcript_message",
                     metadata=redact_sensitive({"path": str(path), "uuid": row.get("uuid"), "type": row_type}),
                 ))
         return events
 
     def import_events(self) -> list[NormalizedSessionEvent]:
+        self.import_warnings = []
         events: list[NormalizedSessionEvent] = []
         claude_md = self.claude_home / "CLAUDE.md"
         if claude_md.exists():
@@ -499,10 +603,7 @@ class ClaudeCodeImporter:
                 metadata={"path": str(claude_md)},
             ))
         if self.global_state_path.exists():
-            try:
-                obj = json.loads(self.global_state_path.read_text(encoding="utf-8", errors="ignore"))
-            except Exception:
-                obj = {}
+            obj = _read_json_object(self.global_state_path, warnings=self.import_warnings)
             projects = obj.get("projects") if isinstance(obj, dict) else None
             if isinstance(projects, dict):
                 for project, metadata in projects.items():
@@ -519,9 +620,8 @@ class ClaudeCodeImporter:
         for root in self.project_roots:
             settings = root / ".claude" / "settings.local.json"
             if settings.exists():
-                try:
-                    metadata = json.loads(settings.read_text(encoding="utf-8", errors="ignore"))
-                except Exception:
+                metadata = _read_json_object(settings, warnings=self.import_warnings)
+                if not metadata:
                     metadata = {"path": str(settings)}
                 events.append(NormalizedSessionEvent(
                     source="claude_code",

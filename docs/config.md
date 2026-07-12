@@ -2,7 +2,7 @@
 
 默认配置文件：`.dream-memory/config.json`。
 
-主用法是在每个模型 profile 中直接配置 `api_key`。`api_key_env` 仍可作为可选兜底，但默认示例和 `init-config` 都使用 `api_key`。
+主用法是在每个模型 profile 中配置 `api_key_env`，并把真实 key 放在本地 shell 环境变量中。`api_key` 保留为空字符串；只有临时本机调试时才建议直写 key。
 
 ## Run Defaults
 
@@ -27,16 +27,16 @@ uv run dream-memory extract-facts
     "primary": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "api_key": "your-anthropic-api-key",
-      "api_key_env": null,
+      "api_key": "",
+      "api_key_env": "ANTHROPIC_API_KEY",
       "base_url": null,
       "timeout_seconds": 60
     },
     "openai_backup": {
       "provider": "openai",
       "model": "gpt-4.1",
-      "api_key": "your-openai-api-key",
-      "api_key_env": null,
+      "api_key": "",
+      "api_key_env": "OPENAI_API_KEY",
       "base_url": null,
       "timeout_seconds": 45
     }
@@ -55,6 +55,13 @@ uv run dream-memory extract-facts
     "allow_rules_fallback": false
   }
 }
+```
+
+使用前在本地 shell 设置对应环境变量，例如：
+
+```bash
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
 ```
 
 ## Retry And Fallback

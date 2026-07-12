@@ -1,9 +1,28 @@
 {
-  "provider": "openai",
-  "model": "gpt-4.1",
-  "api_key_env": "OPENAI_API_KEY",
-  "base_url": null,
-  "timeout_seconds": 60,
+  "models": {
+    "primary": {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "api_key": "",
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": null,
+      "timeout_seconds": 60
+    }
+  },
+  "model_policy": {
+    "default_profile": "primary",
+    "fallback_chain": ["primary"],
+    "retry": {
+      "max_attempts": 3,
+      "initial_delay_seconds": 1.0,
+      "backoff_factor": 2.0,
+      "max_delay_seconds": 8.0,
+      "retry_on_status": [429, 500, 502, 503, 504],
+      "retry_on_timeout": true,
+      "switch_model_on_retry": false
+    },
+    "allow_rules_fallback": false
+  },
   "invoke_model": true,
   "mode": "ai",
   "output_dir": ".dream-memory",

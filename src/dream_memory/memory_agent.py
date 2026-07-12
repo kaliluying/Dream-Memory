@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .memory_dreaming import (
+    CREDENTIAL_LOCATION_RE,
     SENSITIVE_RE,
     _candidate_id as _stable_candidate_id,
     build_candidates_from_facts,
@@ -16,6 +17,7 @@ from .memory_dreaming import (
     _is_long_generic_memory_content,
     _is_structural_or_one_off_artifact,
 )
+from .memory_importers import redact_sensitive_text
 from .model_providers import invoke_model as invoke_model_provider, invoke_model_runtime
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(?P<json>\{.*?\})\s*```", re.DOTALL)
@@ -30,13 +32,12 @@ SHALLOW_PROJECT_TASK_RE = re.compile(
     r"(首页|页面|组件|配置中心|侧边栏|前端|后端|接口|菜单|水印|测试).{0,18}(需要|需|要|使用|改为|改成|全部|重点|关注|删除|修复|更新|真实数据|中文)",
     re.I,
 )
-CREDENTIAL_LOCATION_RE = re.compile(r"(密钥|key|token|api[_-]?key).{0,12}(在|文件|path|路径).{0,24}(\.txt|\.env|json|yaml|yml|配置)", re.I)
-
-
 def _is_prompt_noise_event(event: dict[str, Any]) -> bool:
     event_type = str(event.get("event_type") or "")
     content = str(event.get("content") or "")
     if not content.strip():
+        return True
+    if SENSITIVE_RE.search(content) or CREDENTIAL_LOCATION_RE.search(content):
         return True
     if event_type in {"project_state", "project_settings", "tool_output", "build_log"}:
         return True
@@ -62,12 +63,12 @@ def _event_preview(events: list[dict[str, Any]], limit: int = 80) -> list[dict[s
         if _is_prompt_noise_event(event):
             continue
         preview.append({
-            "event_id": str(event.get("event_id") or event.get("id") or f"event_{index}"),
-            "source": event.get("source"),
-            "session_id": event.get("session_id"),
-            "project": event.get("project"),
-            "role": event.get("role"),
-            "event_type": event.get("event_type"),
+            "event_id": redact_sensitive_text(str(event.get("event_id") or event.get("id") or f"event_{index}")),
+            "source": redact_sensitive_text(str(event.get("source") or "")),
+            "session_id": redact_sensitive_text(str(event.get("session_id") or "")),
+            "project": redact_sensitive_text(str(event.get("project") or "")),
+            "role": redact_sensitive_text(str(event.get("role") or "")),
+            "event_type": redact_sensitive_text(str(event.get("event_type") or "")),
             "content": content[:1200],
         })
     return preview
@@ -85,9 +86,10 @@ def _prompt_event_counts(events: list[dict[str, Any]], limit: int = 80) -> dict[
 
 def build_memory_extraction_prompt(events: list[dict[str, Any]], *, project: str | None) -> str:
     event_json = json.dumps(_event_preview(events), ensure_ascii=False, indent=2)
+    project_filter = redact_sensitive_text(str(project or "global"))
     return f"""You are a memory consolidation agent for a multi-agent coding assistant.
 
-Project filter: {project or "global"}
+Project filter: {project_filter}
 
 Your job:
 - Extract only stable, reusable memories from Claude Code / Codex session events.
@@ -149,24 +151,63 @@ Events:
 """
 
 
-def extract_json_payload(text: str) -> dict[str, Any]:
-    match = JSON_FENCE_RE.search(text)
-    raw = match.group("json") if match else text.strip()
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return {"candidates": []}
-    try:
-        payload = json.loads(raw[start : end + 1])
-    except json.JSONDecodeError:
-        return {"candidates": []}
+def _empty_agent_payload() -> dict[str, Any]:
+    return {"atomic_facts": [], "candidates": []}
+
+
+def _normalize_agent_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        return {"candidates": []}
+        return _empty_agent_payload()
+    payload = dict(payload)
     if not isinstance(payload.get("atomic_facts"), list):
         payload["atomic_facts"] = []
     if not isinstance(payload.get("candidates"), list):
         payload["candidates"] = []
     return payload
+
+
+def _agent_payload_has_memory_items(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("atomic_facts") or payload.get("candidates"))
+
+
+def _agent_payload_has_schema_keys(payload: Any) -> bool:
+    return isinstance(payload, dict) and ("atomic_facts" in payload or "candidates" in payload)
+
+
+def _agent_payload_has_valid_schema_shape(payload: Any) -> bool:
+    if not _agent_payload_has_schema_keys(payload):
+        return False
+    return (
+        (not isinstance(payload, dict) or "atomic_facts" not in payload or isinstance(payload.get("atomic_facts"), list))
+        and (not isinstance(payload, dict) or "candidates" not in payload or isinstance(payload.get("candidates"), list))
+    )
+
+
+def extract_json_payload(text: str, *, require_json: bool = False) -> dict[str, Any]:
+    match = JSON_FENCE_RE.search(text)
+    raw = match.group("json") if match else text.strip()
+    decoder = json.JSONDecoder()
+    fallback_payload: dict[str, Any] | None = None
+    saw_json = False
+    for index, char in enumerate(raw):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            continue
+        saw_json = True
+        has_valid_schema_shape = _agent_payload_has_valid_schema_shape(parsed)
+        payload = _normalize_agent_payload(parsed)
+        if has_valid_schema_shape and _agent_payload_has_memory_items(payload):
+            return payload
+        if has_valid_schema_shape and fallback_payload is None:
+            fallback_payload = payload
+    if require_json and not saw_json:
+        raise ValueError("model response did not contain a JSON object")
+    if require_json and fallback_payload is None:
+        raise ValueError("model response JSON did not match expected memory extraction schema")
+    return fallback_payload or _empty_agent_payload()
 
 
 def _coerce_confidence(value: Any) -> float:
@@ -285,8 +326,9 @@ def validate_agent_candidates(candidates: list[dict[str, Any]], *, project: str 
             continue
         seen.add(key)
         normalized = dict(raw)
+        stable_id = _stable_candidate_id(_normalize_text(content), scope, str(candidate_project) if candidate_project else None)
         normalized.update({
-            "id": str(raw.get("id") or _stable_candidate_id(_normalize_text(content), scope, str(candidate_project) if candidate_project else None)),
+            "id": stable_id,
             "content": content,
             "type": memory_type,
             "scope": scope,
@@ -360,8 +402,9 @@ def validate_agent_atomic_facts(facts: list[dict[str, Any]], *, project: str | N
         if canonical_facts:
             valid.extend(canonical_facts)
             continue
+        stable_id = _stable_candidate_id(_normalize_text(statement), scope, str(fact_project) if fact_project else None)
         valid.append({
-            "id": str(raw.get("id") or _stable_candidate_id(_normalize_text(statement), scope, str(fact_project) if fact_project else None)),
+            "id": stable_id,
             "fact_type": fact_type,
             "statement": statement,
             "scope": scope,
@@ -492,7 +535,7 @@ def agent_extract_memory_candidates(
         result = model.invoke(prompt)
         text = _message_text({"messages": [result]})
 
-    payload = extract_json_payload(text)
+    payload = extract_json_payload(text, require_json=True)
     atomic_facts, candidates = build_agent_candidates_from_payload(payload, project=project)
     response: dict[str, Any] = {
         "runtime": runtime,

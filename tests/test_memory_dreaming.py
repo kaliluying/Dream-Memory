@@ -18,6 +18,7 @@ from dream_memory.memory_dreaming import (
     load_events_jsonl,
     normalize_memory_text,
     normalize_project_path,
+    render_memory_markdown,
     render_context_markdown,
     render_review_queue_memory_preview,
     score_candidate,
@@ -481,6 +482,34 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertIsNone(signals["matched_memory_id"])
         self.assertNotIn("duplicate", analysis["penalties"])
 
+    def test_build_review_queue_ignores_sensitive_existing_memory_cards(self):
+        candidates = [{
+            "id": "cand_1",
+            "type": "workflow",
+            "scope": "project",
+            "project": "/tmp/project",
+            "content": "项目的 API key 存放规则需要通过安全文档审核。",
+            "score": 0.9,
+            "status": "promote",
+            "evidence": [{"event_id": "event_1"}],
+        }]
+        memory_cards = [{
+            "id": "secret",
+            "scope": "project",
+            "project": "/tmp/project",
+            "memory_type": "workflow",
+            "summary": "项目的 API key 在 key.txt 文件中。",
+            "status": "active",
+        }]
+
+        conflicts = detect_candidate_conflicts(candidates, memory_cards)
+        queue = build_review_queue(candidates, memory_cards)
+
+        self.assertEqual(conflicts, {})
+        self.assertEqual(queue[0]["quality_signals"]["value_class"], "new_value")
+        self.assertIsNone(queue[0]["quality_signals"]["matched_memory_id"])
+        self.assertNotIn("key.txt", json.dumps(queue, ensure_ascii=False))
+
     def test_analyze_dream_candidate_rejects_one_off_task(self):
         candidate = {
             "id": "mem_task",
@@ -782,6 +811,47 @@ class MemoryDreamingTests(unittest.TestCase):
             self.assertIn("project_fact", report)
             self.assertIn("workflow", report)
 
+    def test_dream_from_events_report_redacts_sensitive_count_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / ".dream" / "memory"
+            agent_candidates = [
+                {
+                    "id": "cand_1",
+                    "content": "Keep local verification evidence before claiming success.",
+                    "type": "api_key=sk-test-secret-a",
+                    "scope": "project",
+                    "project": "/tmp/project",
+                    "score": 0.9,
+                    "status": "promote",
+                    "quality_signals": {"evidence_quality": "api_key=sk-test-secret-a"},
+                    "evidence": [{"event_id": "event_1"}],
+                },
+                {
+                    "id": "cand_2",
+                    "content": "Keep provider checks separate from mocked local tests.",
+                    "type": "api_key=sk-test-secret-b",
+                    "scope": "project",
+                    "project": "/tmp/project",
+                    "score": 0.85,
+                    "status": "promote",
+                    "quality_signals": {"evidence_quality": "api_key=sk-test-secret-b"},
+                    "evidence": [{"event_id": "event_2"}],
+                },
+            ]
+
+            result = dream_from_events(
+                [{"event_id": "event_1", "source": "codex", "role": "user", "content": "memory input"}],
+                project="/tmp/project",
+                output_dir=output_dir,
+                agent_candidates=agent_candidates,
+                agent_mode=True,
+            )
+
+            report = Path(result.dreams_path).read_text(encoding="utf-8")
+            self.assertNotIn("sk-test-secret", report)
+            self.assertIn("Candidates by type: <redacted>=1, <redacted>-2=1", report)
+            self.assertIn("(<redacted>, dream_score=", report)
+
     def test_dream_from_events_writes_explainable_dream_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / ".dream" / "memory"
@@ -863,6 +933,160 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(cards[0]["summary"], "项目目标是 Claude Code 风格的本地研发助手。")
         self.assertIn("Claude Code 风格", markdown)
 
+    def test_apply_reviewed_memory_rejects_incomplete_approved_memory_update(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "approved",
+            "reviewer": "user",
+            "notes": "looks good",
+            "memory_updates": [{"id": "mem_1"}],
+        }]
+
+        with self.assertRaisesRegex(ValueError, "incomplete memory update"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
+    def test_apply_reviewed_memory_rejects_malformed_approved_memory_update(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "approved",
+            "reviewer": "user",
+            "notes": "looks good",
+            "memory_updates": [{"summary": "用户偏好中文回答。"}],
+        }]
+
+        with self.assertRaisesRegex(ValueError, "incomplete memory update.*id"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
+    def test_apply_reviewed_memory_rejects_approved_web_payload_without_evidence(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "action": "approved",
+            "edited_content": "用户偏好中文回答。",
+            "reviewer": "user",
+            "candidate": {"id": "cand_1", "type": "preference", "scope": "user", "content": "用户偏好中文回答。"},
+        }]
+
+        with self.assertRaisesRegex(ValueError, "incomplete memory update.*evidence_refs"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
+    def test_apply_reviewed_memory_rejects_credential_location_memory_update(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "approved",
+            "reviewer": "user",
+            "memory_updates": [{
+                "id": "mem_1",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "项目的 API key 在 key.txt 文件中。",
+                "evidence_refs": ["event_1"],
+                "approved_by": "user",
+                "approved_at": "2026-07-12T00:00:00Z",
+                "status": "active",
+                "retrieval_hints": [],
+            }],
+        }]
+
+        with self.assertRaisesRegex(ValueError, "sensitive memory update"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
+    def test_apply_reviewed_memory_rejects_sensitive_metadata_memory_update(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "approved",
+            "reviewer": "user",
+            "memory_updates": [{
+                "id": "mem_1",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "项目需要先审核候选记忆再写入长期记忆。",
+                "evidence_refs": ["event_1", "api_key=sk-test-secret"],
+                "approved_by": "Bearer sk-test-secret",
+                "approved_at": "2026-07-12T00:00:00Z",
+                "status": "active",
+                "retrieval_hints": [],
+            }],
+        }]
+
+        with self.assertRaisesRegex(ValueError, "sensitive memory update"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
+    def test_apply_reviewed_memory_rejects_sensitive_metadata_keys(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "approved",
+            "reviewer": "user",
+            "memory_updates": [{
+                "id": "mem_1",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "项目需要先审核候选记忆再写入长期记忆。",
+                "evidence_refs": ["event_1"],
+                "approved_by": "user",
+                "approved_at": "2026-07-12T00:00:00Z",
+                "status": "active",
+                "retrieval_hints": [],
+                "api_key=sk-test-secret": "legacy metadata key",
+            }],
+        }]
+
+        with self.assertRaisesRegex(ValueError, "sensitive memory update"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
+    def test_apply_reviewed_memory_drops_sensitive_existing_cards_when_rewriting(self):
+        existing_cards = [
+            {
+                "id": "safe",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "正式记忆必须人工审核。",
+                "evidence_refs": ["event_1"],
+                "approved_by": "user",
+                "approved_at": "2026-07-12T00:00:00Z",
+                "status": "active",
+                "retrieval_hints": [],
+            },
+            {
+                "id": "secret",
+                "scope": "project",
+                "project": "/tmp/project",
+                "memory_type": "workflow",
+                "summary": "项目的 API key 在 key.txt 文件中。",
+                "evidence_refs": ["event_2"],
+                "approved_by": "user",
+                "approved_at": "2026-07-12T00:00:00Z",
+                "status": "active",
+                "retrieval_hints": [],
+            },
+        ]
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "rejected",
+            "reviewer": "user",
+            "memory_updates": [],
+        }]
+
+        cards, markdown = apply_reviewed_memory(reviewed, existing_cards=existing_cards)
+
+        self.assertEqual([card["id"] for card in cards], ["safe"])
+        self.assertNotIn("key.txt", json.dumps(cards, ensure_ascii=False))
+        self.assertNotIn("key.txt", markdown)
+
+    def test_apply_reviewed_memory_rejects_unknown_review_status(self):
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "status": "approve",
+            "reviewer": "user",
+            "memory_updates": [],
+        }]
+
+        with self.assertRaisesRegex(ValueError, "invalid review status"):
+            apply_reviewed_memory(reviewed, existing_cards=[])
+
     def test_build_agent_context_prioritizes_project_then_user_then_global(self):
         cards = [
             {"id": "mem_1", "scope": "global", "project": None, "memory_type": "workflow", "summary": "正式记忆必须人工审核。", "retrieval_hints": [], "status": "active"},
@@ -875,6 +1099,40 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(context["items"][0]["id"], "mem_3")
         self.assertEqual(context["items"][1]["id"], "mem_2")
         self.assertEqual(context["items"][2]["id"], "mem_1")
+
+    def test_context_and_memory_markdown_skip_sensitive_existing_cards(self):
+        cards = [
+            {"id": "safe", "scope": "project", "project": "/tmp/project", "memory_type": "workflow", "summary": "正式记忆必须人工审核。", "retrieval_hints": [], "status": "active"},
+            {"id": "secret", "scope": "project", "project": "/tmp/project", "memory_type": "workflow", "summary": "项目的 API key 在 key.txt 文件中。", "retrieval_hints": [], "status": "active"},
+        ]
+
+        context = build_agent_context(cards, project="/tmp/project", limit=10)
+        context_markdown = render_context_markdown(context)
+        memory_markdown = render_memory_markdown(cards)
+
+        self.assertEqual([item["id"] for item in context["items"]], ["safe"])
+        self.assertIn("正式记忆必须人工审核", context_markdown)
+        self.assertNotIn("key.txt", context_markdown)
+        self.assertNotIn("key.txt", memory_markdown)
+
+    def test_render_context_markdown_skips_sensitive_direct_context_items(self):
+        context = {
+            "items": [
+                {"id": "safe", "scope": "project", "project": "/tmp/project", "memory_type": "workflow", "summary": "正式记忆必须人工审核。"},
+                {"id": "secret", "scope": "project", "project": "/tmp/project", "memory_type": "workflow", "summary": "API key 在 key.txt 文件中 sk-test-secret"},
+            ],
+            "diagnostics": [
+                {"id": "safe", "reason": "intent_alias_match", "relevance": 1.0},
+                {"id": "secret", "reason": "token=sk-test-secret", "relevance": 0.9},
+            ],
+        }
+
+        markdown = render_context_markdown(context)
+
+        self.assertIn("正式记忆必须人工审核", markdown)
+        self.assertNotIn("sk-test-secret", markdown)
+        self.assertNotIn("key.txt", markdown)
+        self.assertNotIn("token=", markdown)
 
     def test_build_agent_context_boosts_autonomy_and_review_gate_intents(self):
         cards = [
@@ -1462,6 +1720,34 @@ class MemoryDreamingTests(unittest.TestCase):
 
         self.assertEqual(facts, [])
 
+    def test_build_candidates_from_facts_drops_credential_location_statements(self):
+        facts = [{
+            "id": "fact_1",
+            "fact_type": "workflow",
+            "statement": "项目的 API key 在 key.txt 文件中。",
+            "scope": "project",
+            "project": "/tmp/project",
+            "evidence_refs": ["event_1"],
+            "confidence": 0.9,
+            "tags": ["credential"],
+        }]
+
+        self.assertEqual(build_candidates_from_facts(facts), [])
+
+    def test_score_candidate_rejects_credential_location_content(self):
+        candidate = {
+            "type": "workflow",
+            "scope": "project",
+            "content": "项目的 API key 在 key.txt 文件中。",
+            "evidence": [{"event_id": "event_1"}],
+            "tags": [],
+        }
+
+        scored = score_candidate(candidate)
+
+        self.assertEqual(scored["status"], "reject")
+        self.assertLess(scored["score"], 0.5)
+
     def test_extract_atomic_facts_drops_other_project_markers_when_project_filter_is_set(self):
         events = [
             {
@@ -1577,6 +1863,30 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(decisions[0]["status"], "approved")
         self.assertIn("Evidence: event_1", markdown)
 
+    def test_apply_reviewed_memory_uses_latest_decision_per_candidate(self):
+        reviewed = [
+            {
+                "candidate_id": "cand_1",
+                "action": "approved",
+                "edited_content": "用户偏好中文回答。",
+                "reviewer": "user",
+                "candidate": {
+                    "id": "cand_1",
+                    "type": "preference",
+                    "scope": "user",
+                    "content": "用户偏好中文回答。",
+                    "evidence": [{"event_id": "event_1"}],
+                },
+            },
+            {"candidate_id": "cand_1", "action": "rejected", "reviewer": "user", "candidate": {"id": "cand_1"}},
+        ]
+
+        cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards=[], return_decisions=True)
+
+        self.assertEqual(cards, [])
+        self.assertNotIn("用户偏好中文回答", markdown)
+        self.assertEqual([decision["status"] for decision in decisions], ["rejected"])
+
     def test_apply_reviewed_memory_marks_replaced_card_superseded_on_merge(self):
         existing = [{"id": "mem_old", "scope": "project", "project": "/tmp/project", "memory_type": "decision", "summary": "旧目标。", "evidence_refs": ["event_1"], "approved_by": "user", "approved_at": "2026-07-05T00:00:00Z", "status": "active", "retrieval_hints": []}]
         reviewed = [{
@@ -1595,6 +1905,32 @@ class MemoryDreamingTests(unittest.TestCase):
         self.assertEqual(by_id["mem_old"]["status"], "superseded")
         self.assertTrue(any(card["summary"] == "新目标。" and card["status"] == "active" for card in cards))
         self.assertEqual(decisions[0]["status"], "merged")
+
+    def test_apply_reviewed_memory_infers_superseded_card_on_merge_from_candidate_match(self):
+        existing = [{"id": "mem_old", "scope": "project", "project": "/tmp/project", "memory_type": "decision", "summary": "旧目标。", "evidence_refs": ["event_1"], "approved_by": "user", "approved_at": "2026-07-05T00:00:00Z", "status": "active", "retrieval_hints": []}]
+        reviewed = [{
+            "candidate_id": "cand_1",
+            "action": "merged",
+            "edited_content": "新目标。",
+            "reviewer": "user",
+            "candidate": {
+                "id": "cand_1",
+                "type": "decision",
+                "scope": "project",
+                "project": "/tmp/project",
+                "content": "新目标。",
+                "evidence": [{"event_id": "event_2"}],
+                "quality_signals": {"matched_memory_id": "mem_old"},
+                "conflicts": [{"memory_id": "mem_old"}],
+            },
+        }]
+
+        cards, _, decisions = apply_reviewed_memory(reviewed, existing_cards=existing, return_decisions=True)
+        by_id = {card["id"]: card for card in cards}
+
+        self.assertEqual(by_id["mem_old"]["status"], "superseded")
+        self.assertTrue(any(card["summary"] == "新目标。" and card["status"] == "active" for card in cards))
+        self.assertEqual(decisions[0]["supersedes"], ["mem_old"])
 
 
 if __name__ == "__main__":

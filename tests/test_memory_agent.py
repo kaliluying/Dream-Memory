@@ -47,6 +47,28 @@ class MemoryAgentTests(unittest.TestCase):
         self.assertIn('"event_id": "eval_pref_1"', prompt)
         self.assertNotIn('"event_id": "event_1"', prompt)
 
+    def test_build_memory_extraction_prompt_redacts_sensitive_metadata(self):
+        events = [
+            {
+                "event_id": "safe_event",
+                "source": "codex-sk-test-secret",
+                "session_id": "session-sk-test-secret",
+                "project": "/tmp/project-sk-test-secret",
+                "role": "user",
+                "event_type": "history_prompt",
+                "content": "用户偏好中文回答。",
+            }
+        ]
+
+        prompt = build_memory_extraction_prompt(events, project="/tmp/project-sk-test-secret")
+
+        self.assertNotIn("sk-test-secret", prompt)
+        self.assertIn("Project filter: /tmp/project-<redacted>", prompt)
+        self.assertIn('"source": "codex-<redacted>"', prompt)
+        self.assertIn('"session_id": "session-<redacted>"', prompt)
+        self.assertIn('"project": "/tmp/project-<redacted>"', prompt)
+        self.assertIn("用户偏好中文回答", prompt)
+
 
     def test_build_memory_extraction_prompt_filters_code_listing_and_stale_project_advice_docs(self):
         events = [
@@ -127,6 +149,72 @@ class MemoryAgentTests(unittest.TestCase):
         payload = extract_json_payload(text)
 
         self.assertEqual(payload["candidates"][0]["decision"], "promote")
+
+    def test_extract_json_payload_from_uppercase_json_fence(self):
+        text = '''```JSON
+{"atomic_facts":[{"statement":"用户偏好中文回答。","fact_type":"preference","scope":"user","confidence":0.9,"evidence":[{"event_id":"event_1"}]}]}
+```'''
+
+        payload = extract_json_payload(text)
+
+        self.assertEqual(payload["atomic_facts"][0]["statement"], "用户偏好中文回答。")
+
+    def test_extract_json_payload_recovers_candidate_object_after_extra_json(self):
+        text = "\n".join([
+            '{"note":"模型先输出了说明性 JSON"}',
+            '{"candidates":[{"content":"用户偏好中文回答。","type":"preference","scope":"user","confidence":0.9,"decision":"promote","evidence":[{"event_id":"event_1"}]}]}',
+        ])
+
+        payload = extract_json_payload(text)
+
+        self.assertEqual(payload["candidates"][0]["content"], "用户偏好中文回答。")
+
+    def test_agent_extract_rejects_model_response_without_json_payload(self):
+        model = FakeChatModel(responses=["not json at all"])
+
+        with self.assertRaisesRegex(ValueError, "model response did not contain a JSON object"):
+            agent_extract_memory_candidates(
+                [{"event_id": "event_1", "source": "codex", "role": "user", "content": "用户偏好中文回答。"}],
+                project="/tmp/project",
+                model=model,
+                invoke_model=True,
+            )
+
+    def test_agent_extract_rejects_json_without_expected_schema(self):
+        model = FakeChatModel(responses=['{"note":"I cannot extract memories"}'])
+
+        with self.assertRaisesRegex(ValueError, "model response JSON did not match expected memory extraction schema"):
+            agent_extract_memory_candidates(
+                [{"event_id": "event_1", "source": "codex", "role": "user", "content": "用户偏好中文回答。"}],
+                project="/tmp/project",
+                model=model,
+                invoke_model=True,
+            )
+
+    def test_agent_extract_rejects_schema_keys_with_wrong_types(self):
+        model = FakeChatModel(responses=['{"atomic_facts":{},"candidates":"none"}'])
+
+        with self.assertRaisesRegex(ValueError, "model response JSON did not match expected memory extraction schema"):
+            agent_extract_memory_candidates(
+                [{"event_id": "event_1", "source": "codex", "role": "user", "content": "用户偏好中文回答。"}],
+                project="/tmp/project",
+                model=model,
+                invoke_model=True,
+            )
+
+    def test_agent_extract_accepts_explicit_empty_json_payload(self):
+        model = FakeChatModel(responses=['{"atomic_facts":[],"candidates":[]}'])
+
+        result = agent_extract_memory_candidates(
+            [{"event_id": "event_1", "source": "codex", "role": "user", "content": "用户偏好中文回答。"}],
+            project="/tmp/project",
+            model=model,
+            invoke_model=True,
+        )
+
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["atomic_facts"], [])
+        self.assertEqual(result["candidates"], [])
 
     def test_agent_extract_dry_run_does_not_call_model(self):
         result = agent_extract_memory_candidates(
@@ -280,6 +368,15 @@ class MemoryAgentTests(unittest.TestCase):
                 "decision": "promote",
                 "evidence": [{"event_id": "event_2"}],
             },
+            {
+                "content": "项目的 API key 在 key.txt 文件中。",
+                "type": "workflow",
+                "scope": "project",
+                "project": "/tmp/project",
+                "confidence": 0.9,
+                "decision": "promote",
+                "evidence": [{"event_id": "event_3"}],
+            },
             {"content": "缺少 evidence", "type": "preference", "scope": "user", "decision": "promote"},
         ]
 
@@ -289,6 +386,45 @@ class MemoryAgentTests(unittest.TestCase):
         self.assertEqual(valid[0]["content"], "用户偏好中文回答。")
         self.assertEqual(valid[0]["status"], "promote")
         self.assertEqual(valid[0]["score"], 0.95)
+
+    def test_validate_agent_atomic_facts_drops_credential_location_statement(self):
+        from dream_memory.memory_agent import build_agent_candidates_from_payload
+
+        payload = {
+            "atomic_facts": [
+                {
+                    "statement": "项目的 API key 在 key.txt 文件中。",
+                    "fact_type": "workflow",
+                    "scope": "project",
+                    "project": "/tmp/project",
+                    "confidence": 0.9,
+                    "evidence": [{"event_id": "event_1", "source": "codex"}],
+                    "long_term": True,
+                }
+            ]
+        }
+
+        facts, candidates = build_agent_candidates_from_payload(payload, project="/tmp/project")
+
+        self.assertEqual(facts, [])
+        self.assertEqual(candidates, [])
+
+    def test_validate_agent_candidates_replaces_model_supplied_candidate_id(self):
+        candidates = [{
+            "id": "../bad",
+            "content": "用户偏好中文回答。",
+            "type": "preference",
+            "scope": "user",
+            "confidence": 0.95,
+            "decision": "promote",
+            "evidence": [{"event_id": "event_1", "source": "codex"}],
+        }]
+
+        valid = validate_agent_candidates(candidates, project="/tmp/project")
+
+        self.assertEqual(len(valid), 1)
+        self.assertRegex(valid[0]["id"], r"^mem_[0-9a-f]{12}$")
+        self.assertNotEqual(valid[0]["id"], "../bad")
 
     def test_validate_agent_atomic_facts_keeps_package_manager_workflow(self):
         from dream_memory.memory_agent import build_agent_candidates_from_payload
@@ -314,6 +450,28 @@ class MemoryAgentTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["type"], "workflow")
         self.assertIn("uv", candidates[0]["content"])
+
+    def test_validate_agent_atomic_facts_replaces_model_supplied_fact_id(self):
+        from dream_memory.memory_agent import build_agent_candidates_from_payload
+
+        payload = {
+            "atomic_facts": [{
+                "id": "../bad",
+                "statement": "用户偏好中文回答。",
+                "fact_type": "preference",
+                "scope": "user",
+                "confidence": 0.95,
+                "evidence": [{"event_id": "event_1", "source": "codex"}],
+                "long_term": True,
+            }]
+        }
+
+        facts, candidates = build_agent_candidates_from_payload(payload, project="/tmp/project")
+
+        self.assertEqual(len(facts), 1)
+        self.assertRegex(facts[0]["id"], r"^mem_[0-9a-f]{12}$")
+        self.assertNotEqual(facts[0]["id"], "../bad")
+        self.assertEqual(candidates[0]["id"], facts[0]["id"])
 
     def test_validate_agent_atomic_facts_splits_combined_project_marker_memory(self):
         from dream_memory.memory_agent import build_agent_candidates_from_payload

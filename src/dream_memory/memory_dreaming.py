@@ -14,6 +14,7 @@ SENSITIVE_RE = re.compile(
     r"(sk-[a-zA-Z0-9]|api[_-]?key\s*[=:]|access[_-]?token\s*[=:]|refresh[_-]?token\s*[=:]|password\s*[=:]|secret\s*[=:]|cookie\s*[=:]|bearer\s+[a-zA-Z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)",
     re.I,
 )
+CREDENTIAL_LOCATION_RE = re.compile(r"(密钥|key|token|api[_-]?key).{0,12}(在|文件|path|路径).{0,24}(\.txt|\.env|json|yaml|yml|配置)", re.I)
 BLOCKED_EVENT_TYPES = {"project_state", "tool_output", "build_log"}
 RAW_TRANSCRIPT_RE = re.compile(r"(^|\n)\s*(user|assistant|system)\s*:", re.I)
 TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,}")
@@ -65,6 +66,7 @@ DEFAULT_DREAM_PROMOTION_POLICY: dict[str, Any] = {
     "conflict_promote_action": "merge",
 }
 ACTION_ORDER = ["create", "merge", "needs_more_evidence", "review", "reject"]
+ALLOWED_REVIEW_DECISION_STATUSES = {"approved", "rejected", "edited_and_approved", "merged", "needs_more_evidence"}
 TASK_INTENT_ALIASES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
     (("提交", "推送", "拉取", "分支", "版本号", "commit", "push", "branch"), ("git", "repo-maintenance", "commit", "push", "branch", "仓库维护", "提交", "推送", "分支")),
     (("梳理", "审查", "分析", "可行性", "看看", "review"), ("repo-inspection", "code-grounded", "analysis", "真实仓库", "梳理", "审查", "分析")),
@@ -93,6 +95,29 @@ DURABLE_MEMORY_MARKERS = [
 ]
 
 
+def _iter_sensitive_texts(value: object) -> list[str]:
+    texts: list[str] = []
+    if isinstance(value, str):
+        if value.strip():
+            texts.append(value)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            texts.extend(_iter_sensitive_texts(str(key)))
+            texts.extend(_iter_sensitive_texts(item))
+    elif isinstance(value, list):
+        for item in value:
+            texts.extend(_iter_sensitive_texts(item))
+    return texts
+
+
+def contains_sensitive_memory_text(*values: object) -> bool:
+    for value in values:
+        for text in _iter_sensitive_texts(value):
+            if SENSITIVE_RE.search(text) or CREDENTIAL_LOCATION_RE.search(text):
+                return True
+    return False
+
+
 @dataclass(frozen=True)
 class DreamResult:
     event_count: int
@@ -111,19 +136,24 @@ class DreamResult:
         return self.__dict__.copy()
 
 
-def load_events_jsonl(path: Path | str) -> list[dict[str, Any]]:
+def load_events_jsonl(path: Path | str, *, strict: bool = False, label: str = "JSONL") -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    with Path(path).expanduser().open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
+    input_path = Path(path).expanduser()
+    with input_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line_number, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                if strict:
+                    raise ValueError(f"invalid {label} JSON at {input_path}:{line_number}") from exc
                 continue
             if isinstance(obj, dict):
                 events.append(obj)
+            elif strict:
+                raise ValueError(f"invalid {label} row at {input_path}:{line_number}: expected object")
     return events
 
 
@@ -184,6 +214,9 @@ def _is_raw_transcript_like(content: str) -> bool:
 
 def _evidence_refs_from_candidate(candidate: dict[str, Any]) -> list[str]:
     refs: list[str] = []
+    for ref in candidate.get("evidence_refs", []):
+        if ref:
+            refs.append(str(ref))
     for index, evidence in enumerate(candidate.get("evidence", []), start=1):
         if isinstance(evidence, dict):
             ref = evidence.get("event_id") or evidence.get("id") or evidence.get("source_event_id")
@@ -195,7 +228,7 @@ def _evidence_refs_from_candidate(candidate: dict[str, Any]) -> list[str]:
                 refs.append(f"{source}:{session}")
         elif evidence:
             refs.append(str(evidence))
-    return refs or [str(candidate.get("id") or "candidate")]
+    return refs
 
 
 def _event_text(event: dict[str, Any]) -> str:
@@ -1028,7 +1061,7 @@ def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         score += 0.12
     if len(content) >= 12:
         score += 0.08
-    if SENSITIVE_RE.search(content):
+    if contains_sensitive_memory_text(content):
         score -= 0.6
     score = max(0.0, min(1.0, round(score, 3)))
     candidate = dict(candidate)
@@ -1044,7 +1077,7 @@ def build_candidates_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, A
         if fact.get("fact_type") == "system_state" or "project_state" in fact.get("tags", []):
             continue
         content = str(fact.get("statement") or "").strip()
-        if not content or SENSITIVE_RE.search(content) or _is_raw_transcript_like(content) or _is_low_value_event_content(content):
+        if not content or contains_sensitive_memory_text(content) or _is_raw_transcript_like(content) or _is_low_value_event_content(content):
             continue
         scope = str(fact.get("scope") or "global")
         project = normalize_project_path(str(fact.get("project"))) if fact.get("project") else None
@@ -1102,6 +1135,8 @@ def detect_candidate_conflicts(candidates: list[dict[str, Any]], memory_cards: l
         for card in memory_cards:
             if card.get("status", "active") != "active":
                 continue
+            if contains_sensitive_memory_text(card):
+                continue
             if card.get("scope") != candidate_scope:
                 continue
             if card.get("project") != candidate_project:
@@ -1130,6 +1165,8 @@ def _active_matching_cards(candidate: dict[str, Any], memory_cards: list[dict[st
     matches: list[dict[str, Any]] = []
     for card in memory_cards:
         if card.get("status", "active") != "active":
+            continue
+        if contains_sensitive_memory_text(card):
             continue
         card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
         if card.get("scope") == candidate_scope and card_project == candidate_project and card.get("memory_type") == candidate_type:
@@ -1431,6 +1468,8 @@ def render_memory_markdown(cards: list[dict[str, Any]]) -> str:
     for card in sorted(cards, key=lambda item: (str(item.get("scope")), str(item.get("project") or ""), str(item.get("summary")))):
         if card.get("status") != "active":
             continue
+        if contains_sensitive_memory_text(card):
+            continue
         prefix = str(card.get("scope"))
         if card.get("project"):
             prefix = f"{prefix}: {card['project']}"
@@ -1468,19 +1507,79 @@ def _memory_update_from_web_review(review: dict[str, Any]) -> dict[str, Any] | N
     )
 
 
+def _supersedes_from_review(review: dict[str, Any]) -> list[str]:
+    explicit = review.get("supersedes")
+    refs: list[str] = []
+    if isinstance(explicit, list):
+        refs.extend(str(item) for item in explicit if item)
+    candidate = review.get("candidate") if isinstance(review.get("candidate"), dict) else {}
+    quality = candidate.get("quality_signals") if isinstance(candidate.get("quality_signals"), dict) else {}
+    matched_memory_id = quality.get("matched_memory_id")
+    if matched_memory_id:
+        refs.append(str(matched_memory_id))
+    conflicts = candidate.get("conflicts") if isinstance(candidate.get("conflicts"), list) else []
+    for conflict in conflicts:
+        if isinstance(conflict, dict) and conflict.get("memory_id"):
+            refs.append(str(conflict["memory_id"]))
+    return list(dict.fromkeys(refs))
+
+
 def normalize_review_decision(review: dict[str, Any]) -> dict[str, Any]:
     status = str(review.get("status") or review.get("action") or "pending")
+    if status not in ALLOWED_REVIEW_DECISION_STATUSES:
+        candidate_id = str(review.get("candidate_id") or review.get("candidate", {}).get("id") or "candidate")
+        raise ValueError(f"invalid review status for {candidate_id}: {status}")
     if "memory_updates" in review and "status" in review:
-        return dict(review)
+        decision = dict(review)
+        if status == "merged" and "supersedes" not in decision:
+            supersedes = _supersedes_from_review(review)
+            if supersedes:
+                decision["supersedes"] = supersedes
+        return decision
     update = _memory_update_from_web_review(review)
     updates = [update] if update else []
-    return build_review_decision(
+    decision = build_review_decision(
         candidate_id=str(review.get("candidate_id") or review.get("candidate", {}).get("id") or "candidate"),
         status=status,
         reviewer=str(review.get("reviewer") or "user"),
         notes=str(review.get("notes") or review.get("note") or ""),
         memory_updates=updates,
     )
+    if status == "merged":
+        supersedes = _supersedes_from_review(review)
+        if supersedes:
+            decision["supersedes"] = supersedes
+    return decision
+
+
+REQUIRED_MEMORY_UPDATE_FIELDS = {
+    "id",
+    "scope",
+    "memory_type",
+    "summary",
+    "evidence_refs",
+    "approved_by",
+    "approved_at",
+    "status",
+    "retrieval_hints",
+}
+
+
+def _validate_memory_update(update: dict[str, Any], *, candidate_id: str) -> dict[str, Any]:
+    missing = sorted(field for field in REQUIRED_MEMORY_UPDATE_FIELDS if field not in update)
+    missing.extend(
+        field
+        for field in ["id", "scope", "memory_type", "summary", "approved_by", "approved_at", "status"]
+        if not update.get(field)
+    )
+    if not update.get("evidence_refs"):
+        missing.append("evidence_refs")
+    missing = sorted(set(missing))
+    if missing:
+        raise ValueError(f"incomplete memory update for {candidate_id}: missing {', '.join(missing)}")
+    if contains_sensitive_memory_text(update):
+        raise ValueError(f"sensitive memory update rejected for {candidate_id}")
+    return dict(update)
 
 
 def apply_reviewed_memory(
@@ -1489,21 +1588,32 @@ def apply_reviewed_memory(
     *,
     return_decisions: bool = False,
 ) -> tuple[list[dict[str, Any]], str] | tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
-    cards_by_id = {str(card["id"]): dict(card) for card in existing_cards}
-    decisions: list[dict[str, Any]] = []
+    cards_by_id = {
+        str(card["id"]): dict(card)
+        for card in existing_cards
+        if not contains_sensitive_memory_text(card)
+    }
+    latest_by_candidate: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for raw_decision in reviewed:
         decision = normalize_review_decision(raw_decision)
+        candidate_id = str(decision.get("candidate_id") or "candidate")
+        latest_by_candidate[candidate_id] = (raw_decision, decision)
+
+    decisions: list[dict[str, Any]] = []
+    for raw_decision, decision in latest_by_candidate.values():
         decisions.append(decision)
         if decision.get("status") not in {"approved", "edited_and_approved", "merged"}:
             continue
-        for superseded in raw_decision.get("supersedes", []):
+        candidate_id = str(decision.get("candidate_id") or "candidate")
+        for superseded in decision.get("supersedes", raw_decision.get("supersedes", [])):
             if str(superseded) in cards_by_id:
                 cards_by_id[str(superseded)]["status"] = "superseded"
                 cards_by_id[str(superseded)]["superseded_at"] = str(decision.get("reviewed_at") or datetime.now(timezone.utc).isoformat())
         for update in decision.get("memory_updates", []):
-            if not isinstance(update, dict) or "id" not in update:
-                continue
-            cards_by_id[str(update["id"])] = dict(update)
+            if not isinstance(update, dict):
+                raise ValueError(f"incomplete memory update for {candidate_id}: expected object")
+            validated_update = _validate_memory_update(update, candidate_id=candidate_id)
+            cards_by_id[str(validated_update["id"])] = validated_update
     cards = list(cards_by_id.values())
     markdown = render_memory_markdown(cards)
     if return_decisions:
@@ -1582,6 +1692,8 @@ def build_agent_context(memory_cards: list[dict[str, Any]], *, project: str | No
     for card in memory_cards:
         if card.get("status") != "active":
             continue
+        if contains_sensitive_memory_text(card):
+            continue
         if card.get("scope") == "project":
             card_project = normalize_project_path(str(card.get("project"))) if card.get("project") else None
             if not normalized_project or card_project != normalized_project:
@@ -1610,6 +1722,8 @@ def render_context_markdown(context: dict[str, Any]) -> str:
     lines = ["## Relevant Memory", ""]
     diagnostics_by_id = {str(item.get("id")): item for item in context.get("diagnostics", []) if item.get("id")}
     for item in context.get("items", []):
+        if contains_sensitive_memory_text(item):
+            continue
         prefix = str(item.get("scope"))
         if item.get("project"):
             prefix = f"{prefix}: {item['project']}"
@@ -1617,8 +1731,8 @@ def render_context_markdown(context: dict[str, Any]) -> str:
         diag = diagnostics_by_id.get(str(item.get("id")))
         suffix = ""
         if diag:
-            suffix = f" _(rank_reason={diag.get('reason')}, relevance={diag.get('relevance')})_"
-        lines.append(f"- **{prefix} / {item.get('memory_type')}**: {summary}{suffix}")
+            suffix = f" _(rank_reason={_safe_report_text(diag.get('reason'))}, relevance={diag.get('relevance')})_"
+        lines.append(f"- **{_safe_report_text(prefix)} / {_safe_report_text(item.get('memory_type'))}**: {_safe_report_text(summary)}{suffix}")
     return "\n".join(lines) + "\n"
 
 
@@ -1639,12 +1753,17 @@ def _action_heading(action: str) -> str:
     }.get(action, action.replace("_", " ").title())
 
 
+def _safe_report_text(value: object) -> str:
+    text = str(value or "")
+    return "<redacted>" if contains_sensitive_memory_text(text) else text
+
+
 def _candidate_report_line(candidate: dict[str, Any], analysis: dict[str, Any]) -> str:
-    reasons = ", ".join(str(item) for item in analysis.get("reasons", [])) or "none"
-    penalties = ", ".join(str(item) for item in analysis.get("penalties", [])) or "none"
+    reasons = ", ".join(_safe_report_text(item) for item in analysis.get("reasons", [])) or "none"
+    penalties = ", ".join(_safe_report_text(item) for item in analysis.get("penalties", [])) or "none"
     return (
-        f"- ({candidate.get('type')}, dream_score={analysis.get('dream_score')}, "
-        f"action={analysis.get('suggested_action')}) {candidate.get('content')} "
+        f"- ({_safe_report_text(candidate.get('type'))}, dream_score={analysis.get('dream_score')}, "
+        f"action={_safe_report_text(analysis.get('suggested_action'))}) {_safe_report_text(candidate.get('content'))} "
         f"[reasons: {reasons}; penalties: {penalties}]"
     )
 
@@ -1657,10 +1776,26 @@ def _count_by_key(items: list[dict[str, Any]], key: str, *, fallback: str = "unk
     return dict(sorted(counts.items()))
 
 
+def _safe_report_count_labels(counts: dict[str, int]) -> dict[str, int]:
+    safe_counts: dict[str, int] = {}
+    used: set[str] = set()
+    for key, value in counts.items():
+        base = "<redacted>" if contains_sensitive_memory_text(key) else str(key)
+        label = base
+        if label in used:
+            index = 2
+            while f"{base}-{index}" in used:
+                index += 1
+            label = f"{base}-{index}"
+        safe_counts[label] = value
+        used.add(label)
+    return safe_counts
+
+
 def _format_counts(counts: dict[str, int]) -> str:
     if not counts:
         return "none"
-    return ", ".join(f"{key}={value}" for key, value in counts.items())
+    return ", ".join(f"{key}={value}" for key, value in _safe_report_count_labels(counts).items())
 
 
 def _render_dreams(events: list[dict[str, Any]], candidates: list[dict[str, Any]], *, facts: list[dict[str, Any]] | None = None) -> str:

@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from .memory_agent import agent_extract_memory_candidates
-from .memory_dreaming import build_candidates_from_facts, extract_atomic_facts, load_events_jsonl, normalize_memory_text, _text_similarity
+from .memory_dreaming import build_candidates_from_facts, extract_atomic_facts, load_events_jsonl, normalize_memory_text, normalize_project_path, _text_similarity
+from .memory_importers import redact_sensitive_text
 
 
 def _row_events(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -43,13 +44,16 @@ def _matches_expected(candidate: dict[str, Any], expected: dict[str, Any]) -> bo
         return False
     type_match = not expected.get("type") or expected.get("type") == candidate.get("type")
     scope_match = not expected.get("scope") or expected.get("scope") == candidate.get("scope")
+    project_match = True
+    if expected.get("project"):
+        project_match = normalize_project_path(str(expected.get("project"))) == normalize_project_path(str(candidate.get("project") or ""))
     text_match = (
         expected_text in candidate_text
         or candidate_text in expected_text
         or _text_similarity(candidate_text, expected_text) >= 0.5
         or _character_similarity(candidate_text, expected_text) >= 0.72
     )
-    return bool(type_match and scope_match and text_match)
+    return bool(type_match and scope_match and project_match and text_match)
 
 
 def _scored_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -103,9 +107,11 @@ def evaluate_labeled_events(
     fallback_rules_on_error: bool = False,
     fallback_rules_on_empty: bool = False,
 ) -> dict[str, Any]:
-    rows = load_events_jsonl(path)
+    rows = load_events_jsonl(path, strict=True, label="eval input")
     if max_rows is not None:
         rows = rows[:max(0, int(max_rows))]
+    if not rows:
+        raise ValueError(f"eval input has no valid rows: {path}")
     false_negatives: list[dict[str, Any]] = []
     false_positives: list[dict[str, Any]] = []
     extraction_summaries: list[dict[str, Any]] = []
@@ -143,7 +149,7 @@ def evaluate_labeled_events(
                 "row": row_index,
                 "row_id": row_label,
                 "error_type": exc.__class__.__name__,
-                "error": str(exc),
+                "error": redact_sensitive_text(str(exc)),
                 "fallback": "rules" if fallback_rules_on_error else None,
             })
             if fallback_rules_on_error:

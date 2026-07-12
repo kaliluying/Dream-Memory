@@ -9,12 +9,14 @@ from pathlib import Path
 
 from .memory_agent import agent_extract_memory_candidates
 from .memory_config import DEFAULT_CONFIG_PATH, DEFAULT_MEMORY_CONFIG, load_memory_config, write_default_memory_config
-from .memory_export import render_all_projects_summary, write_marked_file
+from .memory_export import render_all_projects_summary, validate_marked_file_targets, write_marked_file, write_text_file_atomic
 from .memory_eval import evaluate_labeled_events
 from .memory_dreaming import (
+    _evidence_refs_from_candidate,
     apply_reviewed_memory,
     build_agent_context,
     build_review_queue,
+    contains_sensitive_memory_text,
     dream_from_events,
     render_context_markdown,
     render_review_queue_memory_preview,
@@ -23,7 +25,7 @@ from .memory_dreaming import (
     load_events_jsonl,
     write_jsonl_records,
 )
-from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, import_project_instruction_events, import_project_marker_events, write_events_jsonl
+from .memory_importers import ClaudeCodeImporter, CodexImporter, NormalizedSessionEvent, import_project_instruction_events, import_project_marker_events, redact_sensitive, redact_sensitive_text, write_events_jsonl
 from .model_providers import SUPPORTED_MODEL_PROVIDERS, provider_diagnostics, runtime_parts_from_config
 from .memory_runs import (
     append_trace,
@@ -31,7 +33,9 @@ from .memory_runs import (
     create_run_state,
     list_runs,
     load_run_state,
+    read_candidate_trace,
     read_trace,
+    run_artifact_path,
     update_run_state,
     write_candidate_traces,
 )
@@ -363,19 +367,19 @@ def _build_importers(args: argparse.Namespace, config: dict[str, object]) -> tup
     return codex, claude
 
 
-def _load_optional_jsonl(path_value: str | None) -> list[dict[str, object]]:
+def _load_existing_memory_cards(path_value: str | None) -> list[dict[str, object]]:
     if not path_value:
         return []
     path = Path(path_value).expanduser()
     if not path.exists():
         return []
-    return load_events_jsonl(path)
+    return load_events_jsonl(path, strict=True, label="memory cards")
 
 
 def _write_report(output_dir: Path, payload: dict[str, object]) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "import-report.json"
-    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(json.dumps(redact_sensitive(payload), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report_path
 
 
@@ -448,22 +452,29 @@ def _model_trace_callback(state: dict[str, object] | None):
     return callback
 
 
+def _prompt_count_payload(extraction: dict[str, object]) -> dict[str, object]:
+    return {
+        key: extraction[key]
+        for key in ("input_event_count", "prompt_event_count", "filtered_prompt_event_count")
+        if key in extraction
+    }
+
+
+def _safe_artifact_text(value: object) -> str:
+    return redact_sensitive_text(str(value))
+
+
+def _safe_error_text(value: object) -> str:
+    return redact_sensitive_text(str(value))
+
+
+def _print_error(message: object) -> None:
+    print(f"error: {_safe_error_text(message)}", file=sys.stderr)
+
+
 def _run_progress(enabled: bool, message: str) -> None:
     if enabled:
-        print(f"[dream-memory] {message}", file=sys.stderr, flush=True)
-
-
-def _apply_provider_env(args: argparse.Namespace, config: dict[str, object]) -> None:
-    import os
-    api_key_env = _value(getattr(args, "api_key_env", None), config.get("api_key_env"))
-    base_url = _value(getattr(args, "base_url", None), config.get("base_url"))
-    timeout = _value(getattr(args, "timeout_seconds", None), config.get("timeout_seconds"))
-    if api_key_env:
-        os.environ["DEEPAGENT_MEMORY_API_KEY_ENV"] = str(api_key_env)
-    if base_url:
-        os.environ["DEEPAGENT_MEMORY_BASE_URL"] = str(base_url)
-    if timeout:
-        os.environ["DEEPAGENT_MEMORY_TIMEOUT_SECONDS"] = str(timeout)
+        print(f"[dream-memory] {redact_sensitive_text(message)}", file=sys.stderr, flush=True)
 
 
 def _run_dream_to_review(
@@ -482,13 +493,15 @@ def _run_dream_to_review(
     if getattr(args, "project", None) is None and config.get("default_project") is not None:
         args.project = str(config.get("default_project"))
     _run_progress(progress, f"loading events from {input_path}")
-    events = load_events_jsonl(Path(input_path))
+    command = "run" if persistent else "pipeline"
+    events = load_events_jsonl(Path(input_path), strict=True, label=f"{command} input")
+    if not events:
+        raise ValueError(f"{command} input has no valid events: {input_path}")
     output_dir = _configured_output_dir(args, config)
     mode = str(_value(args.mode, config["mode"]))
     model = _configured_model(args, config)
     invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
     runtime_config = _runtime_config_from_args(args, config)
-    _apply_provider_env(args, config)
     _run_progress(progress, f"loaded {len(events)} events; mode={mode}; invoke_model={str(invoke_model).lower()}")
     state: dict[str, object] | None = None
     if persistent:
@@ -515,15 +528,11 @@ def _run_dream_to_review(
             working_dir.mkdir(parents=True, exist_ok=True)
             prompt_path = working_dir / "ai-prompt.md"
             prompt_path.write_text(str(extraction["prompt"]), encoding="utf-8")
-            prompt_count_payload = {
-                key: extraction[key]
-                for key in ("input_event_count", "prompt_event_count", "filtered_prompt_event_count")
-                if key in extraction
-            }
+            prompt_count_payload = _prompt_count_payload(extraction)
             artifacts = {"ai_prompt_path": str(prompt_path), **prompt_count_payload}
             if "raw_response" in extraction:
                 raw_path = working_dir / "ai-raw-response.txt"
-                raw_path.write_text(str(extraction["raw_response"]), encoding="utf-8")
+                raw_path.write_text(_safe_artifact_text(extraction["raw_response"]), encoding="utf-8")
                 artifacts["ai_raw_response_path"] = str(raw_path)
             if state:
                 state = update_run_state(state, phase="candidate_validation", artifacts=artifacts)
@@ -543,8 +552,8 @@ def _run_dream_to_review(
             if state:
                 append_trace(state, "rules_extraction_complete", {"candidate_count": result.candidate_count})
                 _run_progress(progress, f"rules extraction complete; candidates={result.candidate_count}")
-        candidates = load_events_jsonl(Path(result.candidates_path))
-        memory_cards = _load_optional_jsonl(_memory_cards_path(args, config))
+        candidates = load_events_jsonl(Path(result.candidates_path), strict=True, label="generated candidates")
+        memory_cards = _load_existing_memory_cards(_memory_cards_path(args, config))
         _run_progress(progress, f"building review queue from {len(candidates)} candidates")
         queue = build_review_queue(candidates, memory_cards)
         queue_path = write_jsonl_records(queue, working_dir / "review_queue.jsonl")
@@ -553,15 +562,16 @@ def _run_dream_to_review(
         payload = {**payload, "review_queue_path": str(queue_path), "review_count": len(queue)}
     except Exception as exc:
         if state:
+            safe_error = _safe_error_text(exc)
             failed_state = update_run_state(
                 state,
                 status="failed",
                 phase="failed",
-                error=f"{exc.__class__.__name__}: {exc}",
+                error=f"{exc.__class__.__name__}: {safe_error}",
                 next_actions=["inspect trace", "fix provider/config and rerun"],
             )
-            append_trace(failed_state, "run_failed", {"error_type": exc.__class__.__name__, "error": str(exc)})
-            _run_progress(progress, f"run failed: {exc.__class__.__name__}: {exc}")
+            append_trace(failed_state, "run_failed", {"error_type": exc.__class__.__name__, "error": safe_error})
+            _run_progress(progress, f"run failed: {exc.__class__.__name__}: {safe_error}")
         raise
     if state:
         state = update_run_state(
@@ -601,7 +611,7 @@ def _memory_cards_path(args: argparse.Namespace, config: dict[str, object]) -> s
 
 
 def _export_memory(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
-    cards = _load_optional_jsonl(_memory_cards_path(args, config))
+    cards = _load_existing_memory_cards(_memory_cards_path(args, config))
     output_dir = Path(str(_value(args.output_dir, args.project or "."))).expanduser()
     if args.scope == "project":
         project = normalize_project_path(args.project or str(output_dir))
@@ -611,11 +621,13 @@ def _export_memory(*, args: argparse.Namespace, config: dict[str, object]) -> di
         context = build_agent_context(non_project_cards, project=None, limit=int(_value(args.limit, config["context_limit"])))
     markdown = render_context_markdown(context)
     written: list[str] = []
+    targets: list[Path] = []
     if args.target in {"codex", "both"}:
-        target = output_dir / "AGENTS.md" if args.scope == "project" else Path.home() / ".codex" / "AGENTS.md"
-        written.append(str(write_marked_file(target, markdown, heading="## Dream Memory Context")))
+        targets.append(output_dir / "AGENTS.md" if args.scope == "project" else Path.home() / ".codex" / "AGENTS.md")
     if args.target in {"claude", "both"}:
-        target = output_dir / "CLAUDE.md" if args.scope == "project" else Path.home() / ".claude" / "CLAUDE.md"
+        targets.append(output_dir / "CLAUDE.md" if args.scope == "project" else Path.home() / ".claude" / "CLAUDE.md")
+    validate_marked_file_targets(targets)
+    for target in targets:
         written.append(str(write_marked_file(target, markdown, heading="## Dream Memory Context")))
     return {"target": args.target, "scope": args.scope, "project": context.get("project"), "written": written, "count": context.get("count")}
 
@@ -659,11 +671,11 @@ def _summarize_review_queue(queue: list[dict[str, object]]) -> dict[str, object]
             low_score_count += 1
     return {
         "total": len([item for item in queue if isinstance(item, dict)]),
-        "by_status": dict(sorted(by_status.items())),
-        "by_suggested_action": dict(sorted(by_suggested_action.items())),
-        "by_type": dict(sorted(by_type.items())),
-        "by_scope": dict(sorted(by_scope.items())),
-        "by_evidence_quality": dict(sorted(by_evidence_quality.items())),
+        "by_status": _redact_count_bucket(by_status),
+        "by_suggested_action": _redact_count_bucket(by_suggested_action),
+        "by_type": _redact_count_bucket(by_type),
+        "by_scope": _redact_count_bucket(by_scope),
+        "by_evidence_quality": _redact_count_bucket(by_evidence_quality),
         "duplicate_count": duplicate_count,
         "conflict_count": conflict_count,
         "low_score_count": low_score_count,
@@ -685,15 +697,17 @@ def _dream_score(item: dict[str, object]) -> float:
 def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
     output_dir = _configured_output_dir(args, config)
     state = load_run_state(output_dir, args.run_id)
-    artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
-    queue_path = Path(str(args.review_queue or artifacts.get("review_queue_path") or "")).expanduser()
-    if not queue_path.exists():
+    queue_path = Path(args.review_queue).expanduser() if args.review_queue else run_artifact_path(state, "review_queue_path")
+    if queue_path is None or not queue_path.exists():
         raise FileNotFoundError(f"review queue not found for run {args.run_id}: {queue_path}")
-    queue = load_events_jsonl(queue_path)
+    queue = _load_strict_jsonl_dicts(
+        queue_path,
+        label="review queue",
+        missing_message=f"review queue not found for run {args.run_id}",
+        allow_empty=True,
+    )
     reviewed_path = Path(str(args.reviewed_output or Path(str(state["run_dir"])) / "reviewed.jsonl")).expanduser()
     dry_run = bool(getattr(args, "dry_run", False))
-    if reviewed_path.exists() and not dry_run and not bool(getattr(args, "force", False)):
-        raise FileExistsError(f"reviewed output already exists; pass --force to overwrite: {reviewed_path}")
     decisions: list[dict[str, object]] = []
     skipped = 0
     approved = 0
@@ -716,6 +730,12 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
         if not candidate:
             skip("missing_candidate")
             continue
+        if contains_sensitive_memory_text(candidate):
+            skip("sensitive_candidate")
+            continue
+        if contains_sensitive_memory_text(item):
+            skip("sensitive_queue_metadata")
+            continue
         quality_signals = item.get("quality_signals") if isinstance(item.get("quality_signals"), dict) else {}
         if quality_signals.get("duplicate") and not bool(getattr(args, "include_duplicates", False)):
             skip("duplicate")
@@ -724,8 +744,15 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
         analysis = item.get("dream_analysis") if isinstance(item.get("dream_analysis"), dict) else {}
         suggested_action = str(item.get("suggested_action") or analysis.get("suggested_action") or "review")
         score = _dream_score(item)
+        has_evidence = bool(_evidence_refs_from_candidate(candidate))
         review_action: str | None = None
-        if suggested_action == "create" and score >= float(args.min_score):
+        if suggested_action in {"create", "merge", "review"} and score >= float(args.min_score) and not has_evidence:
+            if bool(getattr(args, "keep_review", False)):
+                skip("missing_evidence")
+                continue
+            review_action = "needs_more_evidence"
+            needs_more_evidence += 1
+        elif suggested_action == "create" and score >= float(args.min_score):
             review_action = "approved"
             approved += 1
         elif suggested_action == "merge" and score >= float(args.min_score):
@@ -753,12 +780,19 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
             skip("unhandled_action")
         if review_action is None:
             continue
+        decision_candidate = dict(candidate)
+        if isinstance(item.get("quality_signals"), dict):
+            decision_candidate["quality_signals"] = dict(item["quality_signals"])
+        if isinstance(item.get("dream_analysis"), dict):
+            decision_candidate["dream_analysis"] = dict(item["dream_analysis"])
+        if isinstance(item.get("conflicts"), list):
+            decision_candidate["conflicts"] = list(item["conflicts"])
         decisions.append({
             "candidate_id": candidate.get("id") or item.get("candidate_id"),
             "action": review_action,
             "edited_content": candidate.get("content"),
             "reviewer": str(args.reviewer or "auto-review"),
-            "candidate": candidate,
+            "candidate": decision_candidate,
             "review_note": f"Auto-review from suggested_action={suggested_action}, dream_score={score:.3f}.",
         })
     payload = {
@@ -777,6 +811,10 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
     }
     if dry_run:
         return payload
+    if not decisions:
+        return payload
+    if reviewed_path.exists() and not bool(getattr(args, "force", False)):
+        raise FileExistsError(f"reviewed output already exists; pass --force to overwrite: {reviewed_path}")
     reviewed_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl_records(decisions, reviewed_path)
     state = update_run_state(
@@ -789,17 +827,115 @@ def _auto_review_run(*, args: argparse.Namespace, config: dict[str, object]) -> 
     return payload
 
 
+def _load_required_reviewed_decisions(path: Path | str) -> list[dict[str, object]]:
+    return _load_strict_jsonl_dicts(path, label="reviewed decisions", missing_message="reviewed decisions not found")
+
+
+def _load_strict_jsonl_dicts(
+    path: Path | str,
+    *,
+    label: str,
+    missing_message: str | None = None,
+    allow_empty: bool = False,
+) -> list[dict[str, object]]:
+    reviewed_path = Path(path).expanduser()
+    if not reviewed_path.exists():
+        raise FileNotFoundError(f"{missing_message or f'{label} not found'}: {reviewed_path}")
+    reviewed: list[dict[str, object]] = []
+    with reviewed_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid {label} JSON at {reviewed_path}:{line_number}") from exc
+            if not isinstance(payload, dict):
+                raise ValueError(f"invalid {label} row at {reviewed_path}:{line_number}: expected object")
+            reviewed.append(payload)
+    if not reviewed and not allow_empty:
+        raise ValueError(f"{label} is empty: {reviewed_path}")
+    return reviewed
+
+
+def _require_approved_memory_updates(decisions: list[dict[str, object]]) -> None:
+    approved_statuses = {"approved", "edited_and_approved", "merged"}
+    missing = []
+    not_applicable = []
+    for decision in decisions:
+        if decision.get("status") not in approved_statuses:
+            continue
+        candidate_id = str(decision.get("candidate_id") or "candidate")
+        updates = decision.get("memory_updates")
+        if not updates:
+            missing.append(candidate_id)
+            continue
+        applicable = [
+            update
+            for update in updates
+            if isinstance(update, dict) and update.get("id")
+        ] if isinstance(updates, list) else []
+        if not applicable:
+            not_applicable.append(candidate_id)
+    if missing:
+        raise ValueError(f"approved decisions have no memory updates: {', '.join(missing)}")
+    if not_applicable:
+        raise ValueError(f"approved decisions have no applicable memory updates: {', '.join(not_applicable)}")
+
+
+def _write_memory_outputs(
+    *,
+    output_dir: Path,
+    cards: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+    markdown: str,
+) -> tuple[Path, Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    memory_path = output_dir / "MEMORY.md"
+    cards_path = output_dir / "memory_cards.jsonl"
+    decisions_path = output_dir / "review_decisions.jsonl"
+    for target in [cards_path, decisions_path, memory_path]:
+        if target.exists() and not target.is_file():
+            raise ValueError(f"memory output path is not writable: {target}")
+    cards_tmp = cards_path.with_name(f".{cards_path.name}.tmp")
+    decisions_tmp = decisions_path.with_name(f".{decisions_path.name}.tmp")
+    memory_tmp = memory_path.with_name(f".{memory_path.name}.tmp")
+    try:
+        with cards_tmp.open("w", encoding="utf-8") as handle:
+            for card in cards:
+                handle.write(json.dumps(card, ensure_ascii=False) + "\n")
+        with decisions_tmp.open("w", encoding="utf-8") as handle:
+            for decision in decisions:
+                handle.write(json.dumps(decision, ensure_ascii=False) + "\n")
+        memory_tmp.write_text(markdown, encoding="utf-8")
+        cards_tmp.replace(cards_path)
+        decisions_tmp.replace(decisions_path)
+        memory_tmp.replace(memory_path)
+    except OSError as exc:
+        for tmp_path in [cards_tmp, decisions_tmp, memory_tmp]:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise ValueError(f"memory output path is not writable: {output_dir}") from exc
+    return cards_path, decisions_path, memory_path
+
+
 def _resume_run(*, args: argparse.Namespace, config: dict[str, object]) -> dict[str, object]:
     output_dir = _configured_output_dir(args, config)
     state = load_run_state(output_dir, args.run_id)
     reviewed_path = Path(args.reviewed).expanduser() if args.reviewed else Path(str(state["run_dir"])) / "reviewed.jsonl"
-    reviewed = load_events_jsonl(reviewed_path) if reviewed_path.exists() else []
-    existing_cards = _load_optional_jsonl(_memory_cards_path(args, config))
+    reviewed = _load_required_reviewed_decisions(reviewed_path)
+    existing_cards = _load_existing_memory_cards(_memory_cards_path(args, config))
     cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
-    cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
-    decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
-    memory_path = output_dir / "MEMORY.md"
-    memory_path.write_text(markdown, encoding="utf-8")
+    _require_approved_memory_updates(decisions)
+    cards_path, decisions_path, memory_path = _write_memory_outputs(
+        output_dir=output_dir,
+        cards=cards,
+        decisions=decisions,
+        markdown=markdown,
+    )
     state = update_run_state(
         state,
         status="completed",
@@ -839,6 +975,7 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
     project_path = str(getattr(args, "project", None) or ".").strip() or "."
     auto_mode = bool(getattr(args, "auto", False))
     min_score = float(getattr(args, "min_score", 0.5))
+    warnings: list[dict[str, object]] = []
 
     # Step 1: import events
     _run_progress(True, f"importing events (project={project_path})...")
@@ -850,6 +987,8 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
     )
     codex_events = codex.import_events()
     claude_events = claude.import_events()
+    warnings.extend(codex.import_warnings)
+    warnings.extend(claude.import_warnings)
     events = list(codex_events) + list(claude_events)
     project_roots = [Path(project_path).expanduser()]
     project_events = import_project_instruction_events(project_roots)
@@ -864,7 +1003,13 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
     _run_progress(True, f"imported {len(events)} events")
 
     if not events:
-        return {"event_count": 0, "status": "no_events", "message": "no events found; nothing to sync"}
+        return {
+            "event_count": 0,
+            "warning_count": len(warnings),
+            "warnings": warnings,
+            "status": "no_events",
+            "message": "no events found; nothing to sync",
+        }
 
     # Step 2: dream (persistent run for better state tracking)
     dream_args = argparse.Namespace(
@@ -883,7 +1028,7 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
     )
     payload, state = _run_dream_to_review(args=dream_args, config=config, persistent=True)
     if not state:
-        return {**payload, "event_count": len(events)}
+        return {**payload, "event_count": len(events), "warning_count": len(warnings), "warnings": warnings}
 
     run_id = str(state["run_id"])
     candidate_count = int(payload.get("candidate_count") or 0)
@@ -893,6 +1038,8 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
         return {
             **payload,
             "event_count": len(events),
+            "warning_count": len(warnings),
+            "warnings": warnings,
             "run_id": run_id,
             "auto": False,
             "next": f"dream-memory auto-review --run-id {run_id} --min-score {min_score}",
@@ -922,9 +1069,11 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
         f"needs_manual={auto_payload.get('needs_more_evidence', 0)}",
     )
 
-    if auto_payload.get("approved", 0) == 0 and auto_payload.get("needs_more_evidence", 0) == 0:
+    if auto_payload.get("approved", 0) == 0:
         return {
             "event_count": len(events),
+            "warning_count": len(warnings),
+            "warnings": warnings,
             "run_id": run_id,
             "candidate_count": candidate_count,
             "auto_review": auto_payload,
@@ -948,6 +1097,8 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
 
     return {
         "event_count": len(events),
+        "warning_count": len(warnings),
+        "warnings": warnings,
         "run_id": run_id,
         "candidate_count": candidate_count,
         "auto_review": auto_payload,
@@ -958,7 +1109,31 @@ def _handle_sync(*, args: argparse.Namespace, config: dict[str, object]) -> dict
 
 
 def _print_json(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(json.dumps(redact_sensitive(payload), ensure_ascii=False, indent=2))
+
+
+def _redact_count_bucket(bucket: dict[str, int]) -> dict[str, int]:
+    labels = _stable_redacted_labels(list(bucket))
+    return {
+        labels.get(str(name), str(name)): count
+        for name, count in sorted(bucket.items(), key=lambda item: labels.get(str(item[0]), str(item[0])))
+    }
+
+
+def _stable_redacted_labels(names: list[str]) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    used: set[str] = set()
+    for name in names:
+        base = redact_sensitive_text(str(name))
+        label = base
+        if label in used:
+            index = 2
+            while f"{base}-{index}" in used:
+                index += 1
+            label = f"{base}-{index}"
+        labels[str(name)] = label
+        used.add(label)
+    return labels
 
 
 def _handle_init(*, args: argparse.Namespace, config: dict[str, object]) -> int:
@@ -967,7 +1142,11 @@ def _handle_init(*, args: argparse.Namespace, config: dict[str, object]) -> int:
 
 
 def _handle_init_config(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    path = write_default_memory_config(args.output)
+    try:
+        path = write_default_memory_config(args.output)
+    except FileExistsError as exc:
+        _print_error(exc)
+        return 2
     _print_json({"config_path": str(path)})
     return 0
 
@@ -976,12 +1155,14 @@ def _handle_check_provider(*, args: argparse.Namespace, config: dict[str, object
     if args.all or args.profile:
         profiles, _ = runtime_parts_from_config(config)
         selected = [args.profile] if args.profile else list(profiles)
+        profile_labels = _stable_redacted_labels([str(profile_name) for profile_name in selected])
         diagnostics: dict[str, object] = {}
         ok = True
         for profile_name in selected:
+            profile_label = profile_labels.get(str(profile_name), str(profile_name))
             profile = profiles.get(profile_name)
             if profile is None:
-                diagnostics[profile_name] = {"ok": False, "error": f"unknown profile: {profile_name}"}
+                diagnostics[profile_label] = {"ok": False, "error": f"unknown profile: {profile_label}"}
                 ok = False
                 continue
             item = provider_diagnostics(
@@ -993,7 +1174,7 @@ def _handle_check_provider(*, args: argparse.Namespace, config: dict[str, object
                 timeout_seconds=profile.config.timeout_seconds,
                 invoke=bool(args.invoke),
             )
-            diagnostics[profile_name] = item
+            diagnostics[profile_label] = item
             ok = ok and bool(item.get("ok"))
         _print_json({"profiles": diagnostics, "ok": ok})
         return 0 if ok else 1
@@ -1009,12 +1190,16 @@ def _handle_check_provider(*, args: argparse.Namespace, config: dict[str, object
         timeout_seconds=profile.timeout_seconds,
         invoke=bool(args.invoke),
     )
-    _print_json(payload)
+    _print_json(redact_sensitive(payload))
     return 0 if payload.get("ok") else 1
 
 
 def _handle_sync_command(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    _print_json(_handle_sync(args=args, config=config))
+    payload = _handle_sync(args=args, config=config)
+    if payload.get("status") == "no_events":
+        print(f"error: {payload.get('message')}", file=sys.stderr)
+        return 2
+    _print_json(redact_sensitive(payload))
     return 0
 
 
@@ -1049,27 +1234,39 @@ def _handle_eval(*, args: argparse.Namespace, config: dict[str, object]) -> int:
             fallback_rules_on_empty=bool(getattr(args, "fallback_rules_on_empty", False) or config.get("eval_fallback_rules_on_empty", False)),
         )
     except FileNotFoundError as exc:
-        print(f"error: eval input not found: {exc.filename or eval_input}", file=sys.stderr)
+        _print_error(f"eval input not found: {exc.filename or eval_input}")
         return 2
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    safe_payload = redact_sensitive(payload)
     if eval_output:
-        output = Path(str(eval_output)).expanduser()
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            output = write_text_file_atomic(
+                str(eval_output),
+                json.dumps(safe_payload, ensure_ascii=False, indent=2) + "\n",
+                error_label="eval output",
+            )
+        except ValueError as exc:
+            _print_error(exc)
+            return 2
         summary_keys = ["precision", "recall", "f1", "raw_candidate_total", "fallback_candidate_total", "scored_candidate_total", "extraction_success_count", "extraction_error_count", "fallback_count", "fallback_empty_count"]
-        _print_json({"output": str(output), **{k: payload[k] for k in summary_keys if k in payload}})
+        _print_json({"output": str(output), **{k: safe_payload[k] for k in summary_keys if k in safe_payload}})
     else:
-        _print_json(payload)
+        _print_json(safe_payload)
     return 0
 
 
 def _handle_scan(*, args: argparse.Namespace, config: dict[str, object]) -> int:
     codex, claude = _build_importers(args, config)
     payload = {"codex": codex.scan(), "claude": claude.scan()}
-    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    text = json.dumps(redact_sensitive(payload), ensure_ascii=False, indent=2)
     if args.output:
-        path = Path(args.output).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
+        try:
+            write_text_file_atomic(args.output, text + "\n", error_label="scan output")
+        except ValueError as exc:
+            _print_error(exc)
+            return 2
     else:
         print(text)
     return 0
@@ -1081,68 +1278,129 @@ def _handle_extract_facts(*, args: argparse.Namespace, config: dict[str, object]
         print("error: extract-facts requires --input or config extract_input", file=sys.stderr)
         return 2
     try:
-        events = load_events_jsonl(Path(extract_input))
+        events = load_events_jsonl(Path(extract_input), strict=True, label="extract-facts input")
     except FileNotFoundError as exc:
-        print(f"error: extract-facts input not found: {exc.filename or extract_input}", file=sys.stderr)
+        _print_error(f"extract-facts input not found: {exc.filename or extract_input}")
+        return 2
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    if not events:
+        _print_error(f"extract-facts input has no valid events: {extract_input}")
         return 2
     extract_project = _value(getattr(args, "project", None), config.get("extract_project"))
     facts = extract_atomic_facts(events, project=str(extract_project) if extract_project is not None else None)
     output_dir = Path(str(_value(getattr(args, "output_dir", None), config.get("extract_output_dir", config["output_dir"])))).expanduser()
     facts_path = write_jsonl_records(facts, output_dir / "facts.jsonl")
-    _print_json({"fact_count": len(facts), "facts_path": str(facts_path)})
+    _print_json(redact_sensitive({"fact_count": len(facts), "facts_path": str(facts_path)}))
     return 0
 
 
 def _handle_review(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    candidates = load_events_jsonl(Path(args.candidates))
-    memory_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
+    candidates_path = Path(args.candidates)
+    if not candidates_path.expanduser().exists():
+        _print_error(f"candidates not found: {candidates_path}")
+        return 2
+    try:
+        candidates = _load_strict_jsonl_dicts(candidates_path, label="candidates", missing_message="candidates not found")
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    except FileNotFoundError as exc:
+        _print_error(exc)
+        return 2
+    try:
+        memory_cards = _load_existing_memory_cards(str(_value(args.memory_cards, config["memory_cards"])))
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
     queue = build_review_queue(candidates, memory_cards)
     output_dir = _configured_output_dir(args, config)
     queue_path = write_jsonl_records(queue, output_dir / "review_queue.jsonl")
-    _print_json({"review_count": len(queue), "review_queue_path": str(queue_path)})
+    _print_json(redact_sensitive({"review_count": len(queue), "review_queue_path": str(queue_path)}))
     return 0
 
 
 def _handle_review_summary(*, args: argparse.Namespace, config: dict[str, object]) -> int:
     output_dir = _configured_output_dir(args, config)
-    if args.review_queue:
-        queue_path = Path(args.review_queue).expanduser()
-    elif args.run_id:
-        state = load_run_state(output_dir, args.run_id)
-        artifacts = state.get("artifacts", {}) if isinstance(state.get("artifacts"), dict) else {}
-        queue_path = Path(str(artifacts.get("review_queue_path") or "")).expanduser()
-    else:
-        raise ValueError("review-summary requires --run-id or --review-queue")
-    if not queue_path.exists():
-        raise FileNotFoundError(f"review queue not found: {queue_path}")
-    payload = {"review_queue_path": str(queue_path), **_summarize_review_queue(load_events_jsonl(queue_path))}
+    try:
+        if args.review_queue:
+            queue_path = Path(args.review_queue).expanduser()
+        elif args.run_id:
+            state = load_run_state(output_dir, args.run_id)
+            queue_path = run_artifact_path(state, "review_queue_path")
+        else:
+            raise ValueError("review-summary requires --run-id or --review-queue")
+        if queue_path is None or not queue_path.exists():
+            raise FileNotFoundError(f"review queue not found: {queue_path}")
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    except FileNotFoundError as exc:
+        _print_error(exc)
+        return 2
+    try:
+        queue = _load_strict_jsonl_dicts(queue_path, label="review queue")
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    payload = redact_sensitive({"review_queue_path": str(queue_path), **_summarize_review_queue(queue)})
     if args.run_id:
         payload["run_id"] = args.run_id
-    _print_json(payload)
+    _print_json(redact_sensitive(payload))
     return 0
 
 
 def _handle_auto_review(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    _print_json(_auto_review_run(args=args, config=config))
+    try:
+        payload = _auto_review_run(args=args, config=config)
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    except FileNotFoundError as exc:
+        _print_error(exc)
+        return 2
+    except FileExistsError as exc:
+        _print_error(exc)
+        return 2
+    _print_json(redact_sensitive(payload))
     return 0
 
 
 def _handle_apply(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    reviewed = load_events_jsonl(Path(args.reviewed))
-    existing_cards = _load_optional_jsonl(str(_value(args.memory_cards, config["memory_cards"])))
-    cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
+    try:
+        reviewed = _load_required_reviewed_decisions(Path(args.reviewed))
+    except (FileNotFoundError, ValueError) as exc:
+        _print_error(exc)
+        return 2
+    try:
+        existing_cards = _load_existing_memory_cards(str(_value(args.memory_cards, config["memory_cards"])))
+        cards, markdown, decisions = apply_reviewed_memory(reviewed, existing_cards, return_decisions=True)
+        _require_approved_memory_updates(decisions)
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
     output_dir = _configured_output_dir(args, config)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    cards_path = write_jsonl_records(cards, output_dir / "memory_cards.jsonl")
-    decisions_path = write_jsonl_records(decisions, output_dir / "review_decisions.jsonl")
-    memory_path = output_dir / "MEMORY.md"
-    memory_path.write_text(markdown, encoding="utf-8")
-    _print_json({"memory_count": len(cards), "memory_cards_path": str(cards_path), "review_decisions_path": str(decisions_path), "memory_path": str(memory_path), "reviewer": args.reviewer})
+    try:
+        cards_path, decisions_path, memory_path = _write_memory_outputs(
+            output_dir=output_dir,
+            cards=cards,
+            decisions=decisions,
+            markdown=markdown,
+        )
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    _print_json(redact_sensitive({"memory_count": len(cards), "memory_cards_path": str(cards_path), "review_decisions_path": str(decisions_path), "memory_path": str(memory_path), "reviewer": args.reviewer}))
     return 0
 
 
 def _handle_context(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    cards = _load_optional_jsonl(_memory_cards_path(args, config))
+    try:
+        cards = _load_existing_memory_cards(_memory_cards_path(args, config))
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
     payload = build_agent_context(cards, project=args.project, limit=int(_value(args.limit, config["context_limit"])), task=args.task)
     if str(_value(args.format, config["context_format"])) == "markdown":
         print(render_context_markdown(payload), end="")
@@ -1155,12 +1413,12 @@ def _handle_pipeline(*, args: argparse.Namespace, config: dict[str, object]) -> 
     try:
         payload, _ = _run_dream_to_review(args=args, config=config, persistent=False)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _print_error(exc)
         return 2
     except FileNotFoundError as exc:
-        print(f"error: pipeline input not found: {exc.filename or getattr(args, 'input', '')}", file=sys.stderr)
+        _print_error(f"pipeline input not found: {exc.filename or getattr(args, 'input', '')}")
         return 2
-    _print_json(payload)
+    _print_json(redact_sensitive(payload))
     return 0
 
 
@@ -1168,44 +1426,75 @@ def _handle_run(*, args: argparse.Namespace, config: dict[str, object]) -> int:
     try:
         payload, _ = _run_dream_to_review(args=args, config=config, persistent=True)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _print_error(exc)
         return 2
     except FileNotFoundError as exc:
-        print(f"error: run input not found: {exc.filename or getattr(args, 'input', '')}", file=sys.stderr)
+        _print_error(f"run input not found: {exc.filename or getattr(args, 'input', '')}")
         return 2
-    _print_json(payload)
+    _print_json(redact_sensitive(payload))
     return 0
 
 
 def _handle_status(*, args: argparse.Namespace, config: dict[str, object]) -> int:
     output_dir = _configured_output_dir(args, config)
-    payload = load_run_state(output_dir, args.run_id) if args.run_id else {"runs": list_runs(output_dir)}
-    _print_json(payload)
+    try:
+        payload = load_run_state(output_dir, args.run_id) if args.run_id else {"runs": list_runs(output_dir)}
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    except FileNotFoundError as exc:
+        _print_error(exc)
+        return 2
+    _print_json(redact_sensitive(payload))
     return 0
 
 
 def _handle_resume(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    _print_json(_resume_run(args=args, config=config))
+    try:
+        payload = _resume_run(args=args, config=config)
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    except FileNotFoundError as exc:
+        _print_error(exc)
+        return 2
+    _print_json(redact_sensitive(payload))
     return 0
 
 
 def _handle_trace(*, args: argparse.Namespace, config: dict[str, object]) -> int:
     output_dir = _configured_output_dir(args, config)
-    if args.candidate_id:
-        candidate_path = output_dir / "runs" / args.run_id / "candidates" / f"{args.candidate_id}.json"
-        payload = json.loads(candidate_path.read_text(encoding="utf-8")) if candidate_path.exists() else {"candidate_id": args.candidate_id, "trace": read_trace(output_dir, args.run_id, candidate_id=args.candidate_id)}
-    else:
-        payload = {"run_id": args.run_id, "trace": read_trace(output_dir, args.run_id)}
-    _print_json(payload)
+    try:
+        load_run_state(output_dir, args.run_id)
+        if args.candidate_id:
+            payload = read_candidate_trace(output_dir, args.run_id, args.candidate_id)
+            if payload is None:
+                payload = {"candidate_id": args.candidate_id, "trace": read_trace(output_dir, args.run_id, candidate_id=args.candidate_id)}
+        else:
+            payload = {"run_id": args.run_id, "trace": read_trace(output_dir, args.run_id)}
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    except FileNotFoundError as exc:
+        _print_error(exc)
+        return 2
+    _print_json(redact_sensitive(payload))
     return 0
 
 
 def _handle_summary(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    markdown = render_all_projects_summary(_load_optional_jsonl(_memory_cards_path(args, config)))
+    try:
+        cards = _load_existing_memory_cards(_memory_cards_path(args, config))
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    markdown = render_all_projects_summary(cards)
     if args.output:
-        output = Path(args.output).expanduser()
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(markdown, encoding="utf-8")
+        try:
+            output = write_text_file_atomic(args.output, markdown, error_label="summary output")
+        except ValueError as exc:
+            _print_error(exc)
+            return 2
         _print_json({"output": str(output), "scope": args.scope})
     else:
         print(markdown, end="")
@@ -1213,7 +1502,12 @@ def _handle_summary(*, args: argparse.Namespace, config: dict[str, object]) -> i
 
 
 def _handle_export(*, args: argparse.Namespace, config: dict[str, object]) -> int:
-    _print_json(_export_memory(args=args, config=config))
+    try:
+        payload = _export_memory(args=args, config=config)
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    _print_json(payload)
     return 0
 
 
@@ -1222,31 +1516,38 @@ def _handle_dream(*, args: argparse.Namespace, config: dict[str, object]) -> int
     if not dream_input or dream_input == "None":
         print("error: dream requires --input or config default_input", file=sys.stderr)
         return 2
+    if getattr(args, "project", None) is None and config.get("default_project") is not None:
+        args.project = str(config.get("default_project"))
     try:
-        events = load_events_jsonl(Path(dream_input))
+        events = load_events_jsonl(Path(dream_input), strict=True, label="dream input")
     except FileNotFoundError as exc:
-        print(f"error: dream input not found: {exc.filename or dream_input}", file=sys.stderr)
+        _print_error(f"dream input not found: {exc.filename or dream_input}")
+        return 2
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
+    if not events:
+        _print_error(f"dream input has no valid events: {dream_input}")
         return 2
     output_dir = _configured_output_dir(args, config)
     mode = "ai" if args.agent else str(_value(args.mode, config["mode"]))
     model = _configured_model(args, config)
     invoke_model = bool(_value(args.invoke_model, config["invoke_model"]))
     runtime_config = _runtime_config_from_args(args, config)
-    _apply_provider_env(args, config)
     if mode == "ai":
         extraction = agent_extract_memory_candidates(events, project=args.project, model=model, invoke_model=invoke_model, runtime_config=runtime_config)
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "ai-prompt.md").write_text(str(extraction["prompt"]), encoding="utf-8")
         if "raw_response" in extraction:
-            (output_dir / "ai-raw-response.txt").write_text(str(extraction["raw_response"]), encoding="utf-8")
+            (output_dir / "ai-raw-response.txt").write_text(_safe_artifact_text(extraction["raw_response"]), encoding="utf-8")
         result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply), agent_candidates=list(extraction.get("candidates", [])), agent_mode=True)
-        payload = {**result.to_dict(), "mode": "ai", "ai": True, "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(output_dir / "ai-prompt.md")}
+        payload = {**result.to_dict(), "mode": "ai", "ai": True, "ai_dry_run": extraction["dry_run"], "ai_prompt_path": str(output_dir / "ai-prompt.md"), **_prompt_count_payload(extraction)}
         if "model_runtime" in extraction:
             payload["model_runtime"] = extraction["model_runtime"]
     else:
         result = dream_from_events(events, project=args.project, output_dir=output_dir, apply=bool(args.apply))
         payload = {**result.to_dict(), "mode": "rules"}
-    _print_json(payload)
+    _print_json(redact_sensitive(payload))
     return 0
 
 
@@ -1255,13 +1556,16 @@ def _handle_import(*, args: argparse.Namespace, config: dict[str, object]) -> in
     output_dir = Path(str(_value(args.output_dir, config["imports_output_dir"]))).expanduser()
     events: list[NormalizedSessionEvent] = []
     written_files: list[str] = []
+    warnings: list[dict[str, object]] = []
     if args.source in {"codex", "all"}:
         codex_events = codex.import_events()
         events.extend(codex_events)
+        warnings.extend(codex.import_warnings)
         written_files.append(str(write_events_jsonl(codex_events, output_dir / "codex-events.jsonl")))
     if args.source in {"claude", "all"}:
         claude_events = claude.import_events()
         events.extend(claude_events)
+        warnings.extend(claude.import_warnings)
         written_files.append(str(write_events_jsonl(claude_events, output_dir / "claude-events.jsonl")))
     project_roots = _default_project_roots(args.project)
     project_events = import_project_instruction_events(project_roots)
@@ -1278,16 +1582,22 @@ def _handle_import(*, args: argparse.Namespace, config: dict[str, object]) -> in
         "dry_run": bool(args.dry_run),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "event_count": len(events),
+        "warning_count": len(warnings),
+        "warnings": warnings,
         "files": written_files,
         "next_steps": ["Review normalized events before promoting memory.", "Run future dreaming/consolidation over these events."],
     })
-    _print_json({"event_count": len(events), "output_dir": str(output_dir), "dry_run": bool(args.dry_run)})
+    _print_json(redact_sensitive({"event_count": len(events), "output_dir": str(output_dir), "dry_run": bool(args.dry_run), "warning_count": len(warnings)}))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = load_memory_config(args.config)
+    try:
+        config = load_memory_config(args.config)
+    except ValueError as exc:
+        _print_error(exc)
+        return 2
     return args.handler(args=args, config=config)
 
 

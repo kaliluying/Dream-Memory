@@ -84,16 +84,16 @@ uv run dream-memory --config ./memory-config.json init-config --output ./memory-
     "primary": {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "api_key": "your-anthropic-api-key",
-      "api_key_env": null,
+      "api_key": "",
+      "api_key_env": "ANTHROPIC_API_KEY",
       "base_url": null,
       "timeout_seconds": 60
     },
     "openai_backup": {
       "provider": "openai",
       "model": "gpt-4.1",
-      "api_key": "your-openai-api-key",
-      "api_key_env": null,
+      "api_key": "",
+      "api_key_env": "OPENAI_API_KEY",
       "base_url": null,
       "timeout_seconds": 45
     }
@@ -133,13 +133,14 @@ uv run dream-memory check-provider --profile primary
 
 `check-provider --all` 会检查所有 configured profiles。`dream` / `pipeline` / `run` 会按 `model_policy.fallback_chain` 尝试模型；单个 profile 内会按 retry policy 对 `429/500/502/503/504` 和超时做有界指数退避重试。持久化 run 会把模型尝试、失败、成功和 fallback 事件写入 `trace.jsonl`。
 
-API Key 主用法是直接写在 `.dream-memory/config.json` 的 profile 里：
+API Key 推荐通过环境变量配置，避免把真实 key 写入 `.dream-memory/config.json`：
 
 ```json
-"api_key": "你的 key"
+"api_key": "",
+"api_key_env": "ANTHROPIC_API_KEY"
 ```
 
-`check-provider` 只输出 `api_key_configured` / `api_key_present`，不会打印明文 key。`api_key_env` 仍可作为可选兜底。
+然后在本地 shell 中设置对应环境变量，例如 `export ANTHROPIC_API_KEY=...`。如确需临时本机直写 key，可填入 profile 的 `api_key`；`check-provider` 只输出 `api_key_configured` / `api_key_present`，不会打印明文 key。
 
 ## 常用流程
 
@@ -322,10 +323,14 @@ src/dream_memory/
 ├── __init__.py
 ├── memory_agent.py       # AI prompt、模型输出解析、候选校验
 ├── memory_cli.py         # dream-memory CLI
+├── memory_config.py      # 默认配置、配置加载和 runtime 配置校验
 ├── memory_dreaming.py    # 安全过滤、候选/审核/应用/context 核心逻辑
+├── memory_eval.py        # labeled events 评估与 AI/rules 效果报告
 ├── memory_export.py      # AGENTS.md / CLAUDE.md 导出和全项目 summary
 ├── memory_importers.py   # Claude/Codex 会话导入
 ├── memory_models.py      # 记忆数据结构 builders
+├── memory_runs.py        # 可恢复 run 状态、artifact 路径和 trace
+├── model_providers.py    # provider 适配、模型 profile、重试和 fallback runtime
 └── web.py                # Web 审核 UI/API
 ```
 
